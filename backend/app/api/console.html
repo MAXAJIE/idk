@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CGTRS · Console</title>
+<style>
+  :root{--bg:#0e1116;--panel:#161b22;--panel2:#1c222b;--line:#2a313c;--text:#eef1f5;--muted:#a3adbb;--dim:#7a8494;
+    --up:#2fbf71;--down:#ef5350;--warn:#e3b341;--accent:#4aa8ff;--violet:#b48cff;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans SC",sans-serif}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 var(--sans)}
+  header{display:flex;align-items:center;gap:14px;padding:10px 20px;border-bottom:1px solid var(--line);
+    position:sticky;top:0;background:var(--bg);z-index:5;flex-wrap:wrap}
+  h1{font-size:15px;margin:0;font-weight:600}h1 small{color:var(--muted);font-weight:400;margin-left:6px}
+  .grow{flex:1}
+  select{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit;max-width:340px}
+  nav{display:flex;gap:4px;padding:0 20px;border-bottom:1px solid var(--line);background:var(--bg);position:sticky;top:53px;z-index:4}
+  nav button{background:none;border:0;color:var(--muted);font:600 15px var(--sans);padding:14px 20px;cursor:pointer;border-bottom:2px solid transparent}
+  nav button.on{color:var(--text);border-color:var(--accent)}
+  .tab{display:none}.tab.on{display:grid}
+  main{padding:20px;max-width:1500px;margin:0 auto}
+  .grid{gap:16px;grid-template-columns:repeat(12,1fr)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;min-width:0}
+  .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 12px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .s12{grid-column:span 12}.s8{grid-column:span 8}.s4{grid-column:span 4}.s6{grid-column:span 6}
+  @media(max-width:1000px){.s8,.s4,.s6{grid-column:span 12}}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px}
+  .stat .k{font-size:13px;color:var(--muted)}.stat .v{font:600 22px/1.3 var(--mono)}.stat .v.sm{font-size:16px}
+  .up{color:var(--up)}.down{color:var(--down)}.warn{color:var(--warn)}.muted{color:var(--muted)}.mono{font-family:var(--mono)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--dim);display:inline-block}
+  .dot.on{background:var(--up);box-shadow:0 0 6px var(--up)}.dot.err{background:var(--down)}
+  canvas{width:100%;height:300px;display:block}canvas.short{height:150px}
+  table{width:100%;border-collapse:collapse;font-size:14px}tbody tr:nth-child(even){background:#131820}tbody tr:hover{background:var(--panel2)}
+  th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{color:var(--muted);font-weight:600;font-size:13px;position:sticky;top:0;background:var(--panel)}
+  td.num,th.num{text-align:right;font-family:var(--mono)}td.wrap{white-space:normal}
+  .scroll{max-height:360px;overflow:auto}
+  .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid currentColor}
+  .bar{height:8px;background:var(--panel2);border-radius:99px;overflow:hidden}.bar i{display:block;height:100%;background:var(--accent)}
+  .legend{display:flex;gap:14px;font-size:12px;color:var(--muted)}.legend b{display:inline-block;width:10px;height:3px;margin-right:5px;vertical-align:middle}
+  .side{border-radius:8px;padding:12px;background:var(--panel2);border-top:3px solid var(--dim)}
+  .side.bull{border-color:var(--up)}.side.bear{border-color:var(--down)}
+  .side ul{margin:6px 0;padding-left:18px}.side li{margin:3px 0}
+  .ev{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+  .ev div{background:var(--panel2);border-radius:8px;padding:12px;font:13px/1.6 var(--mono);word-break:break-word}
+  .ev b{display:block;font:600 11px var(--sans);text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+  .meter{position:relative;height:12px;border-radius:99px;background:linear-gradient(90deg,var(--down),var(--panel2) 50%,var(--up))}
+  .meter i{position:absolute;top:-4px;width:4px;height:20px;background:var(--text);border-radius:2px}
+  .narr{border-left:3px solid var(--accent);padding:8px 12px;margin:0 0 10px;background:var(--panel2);border-radius:0 6px 6px 0}
+  .narr.bad{border-color:var(--down)}
+  .empty{color:var(--muted);padding:12px 0}
+  code{font-family:var(--mono);background:var(--panel2);padding:1px 5px;border-radius:4px}
+  .note{font-size:12px;color:var(--dim);font-weight:400;text-transform:none;letter-spacing:0}
+</style>
+</head>
+<body>
+<header>
+  <h1>CGTRS <small>read-only console · paper / testnet only</small></h1>
+  <div class="grow"></div>
+  <label class="muted">Market
+    <select id="sym"><option>BTCUSDT</option><option>ETHUSDT</option><option>SOLUSDT</option><option>BNBUSDT</option></select>
+    <select id="tf"><option value="1">1m</option><option value="5">5m</option><option value="15">15m</option>
+      <option value="60" selected>1h</option><option value="240">4h</option><option value="1440">1d</option></select>
+  </label>
+  <label class="muted">Experiment <select id="exp"></select></label>
+</header>
+<nav>
+  <button data-tab="training" class="on">Training</button>
+  <button data-tab="live">Live testnet</button>
+  <button data-tab="debate">Debate &amp; indicators</button>
+</nav>
+
+<main>
+  <!-- TRAINING -->
+  <div class="tab grid on" id="tab-training">
+    <section class="card s12">
+      <h2><span class="dot" id="trDot"></span> Training progress <span class="note" id="trNote"></span></h2>
+      <div class="stats" id="trStats"><div class="empty">Select an experiment, or start one with <code>python -m app.cli run</code>.</div></div>
+      <div style="margin-top:12px" class="bar"><i id="trBar" style="width:0"></i></div>
+    </section>
+    <section class="card s8">
+      <h2>Fitness per generation
+        <span class="legend"><span><b style="background:var(--up)"></b>best</span><span><b style="background:var(--accent)"></b>mean</span><span><b style="background:var(--warn)"></b>valid genes %</span></span></h2>
+      <canvas id="fitChart"></canvas>
+    </section>
+    <section class="card s4"><h2>Pipeline stages</h2><div class="scroll" id="stages"><div class="empty">—</div></div></section>
+    <section class="card s6"><h2>Generations</h2><div class="scroll" id="gens"><div class="empty">—</div></div></section>
+    <section class="card s6"><h2>Judge verdicts (out-of-sample)</h2><div class="scroll" id="verdicts"><div class="empty">—</div></div></section>
+    <section class="card s12"><h2>Final ranking</h2><div class="scroll" id="ranking"><div class="empty">—</div></div></section>
+  </div>
+
+  <!-- LIVE -->
+  <div class="tab grid" id="tab-live">
+    <section class="card s12">
+      <h2><span class="dot" id="liveDot"></span> Live market · Binance USDT-M <span class="note" id="liveAge"></span></h2>
+      <div class="stats" id="liveStats"><div class="empty">Connecting…</div></div>
+    </section>
+    <section class="card s8"><h2>Price <span class="note" id="chartNote"></span></h2><canvas id="chart"></canvas></section>
+    <section class="card s4">
+      <h2>Forward-test status</h2>
+      <div class="stats" id="ftStats"><div class="empty">No live/dry-run activity yet.</div></div>
+      <p class="note">Start: <code>python -m app.cli trade --experiment latest --dry-run</code> (no orders) or without <code>--dry-run</code> for testnet.</p>
+    </section>
+    <section class="card s12"><h2>Decisions &amp; orders</h2><div class="scroll" id="liveEvents"><div class="empty">—</div></div></section>
+    <section class="card s12"><h2><span class="dot" id="llmDot"></span> LLM narration <span class="note" id="llmInfo"></span></h2><div class="scroll" id="narration"><div class="empty">—</div></div></section>
+  </div>
+
+  <!-- DEBATE -->
+  <div class="tab grid" id="tab-debate">
+    <section class="card s12">
+      <h2><span class="dot" id="anDot"></span> Bull vs bear debate · last closed candle <span class="note" id="anNote"></span></h2>
+      <div id="verdict"><div class="empty">Loading…</div></div>
+    </section>
+    <section class="card s6"><div class="side bull" id="bull"></div></section>
+    <section class="card s6"><div class="side bear" id="bear"></div></section>
+    <section class="card s8">
+      <h2>Price with EMA <span class="legend"><span><b style="background:var(--text)"></b>close</span><span><b style="background:var(--accent)"></b>EMA20</span><span><b style="background:var(--violet)"></b>EMA50</span></span></h2>
+      <canvas id="emaChart"></canvas>
+      <h2 style="margin-top:14px">RSI 14 <span class="note">30 / 70 bands</span></h2><canvas id="rsiChart" class="short"></canvas>
+      <h2 style="margin-top:14px">ATR 14</h2><canvas id="atrChart" class="short"></canvas>
+    </section>
+    <section class="card s4"><h2>Analysts</h2><div id="analysts"><div class="empty">—</div></div></section>
+    <section class="card s12"><h2>Evidence the agents may cite</h2><div class="ev" id="evidence"></div></section>
+    <section class="card s12"><h2>Debates behind recent forward-test decisions</h2><div class="scroll" id="pastDebates"><div class="empty">—</div></div></section>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const wsBase = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
+const fmt = (x, d = 2) => x == null || isNaN(x) ? "—" : Number(x).toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d});
+const pct = (x, d = 2) => x == null ? "—" : (x > 0 ? "+" : "") + (x * 100).toFixed(d) + "%";
+const cls = x => x == null ? "" : x > 0 ? "up" : x < 0 ? "down" : "";
+const big = x => x >= 1e9 ? (x / 1e9).toFixed(2) + "B" : x >= 1e6 ? (x / 1e6).toFixed(1) + "M" : fmt(x, 0);
+const ago = ts => { const s = Math.max(0, Date.now() / 1000 - ts); return s < 60 ? s.toFixed(0) + "s ago" : s < 3600 ? (s / 60).toFixed(0) + "m ago" : (s / 3600).toFixed(1) + "h ago"; };
+const time = ts => new Date(ts * 1000).toLocaleString();
+const STATUS = {QUALIFIED:"up",RETAINED:"up",COMPLETED:"up",APPROVE:"up",RESIZE:"up",RETAIN:"up",long:"up",
+  REJECTED:"down",REJECT:"down",FAILED_RISK:"down",ABORTED_INTEGRITY:"down",short:"down",halted:"down",
+  INSUFFICIENT_EVIDENCE:"warn",DEFER:"warn",no_trade:"warn"};
+const pill = s => `<span class="pill ${STATUS[s] || "muted"}">${esc(s)}</span>`;
+const stat = (k, v, c = "", sm = false) => `<div class="stat"><div class="k">${esc(k)}</div><div class="v ${sm ? "sm" : ""} ${c}">${v}</div></div>`;
+async function j(url) { const r = await fetch(url); if (!r.ok) throw new Error(r.status + " " + (await r.text()).slice(0, 200)); return r.json(); }
+const table = (head, rows) => rows.length ? `<table><thead><tr>${head.map(h => `<th class="${h[1] || ""}">${esc(h[0])}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>` : `<div class="empty">—</div>`;
+
+// ---------- canvas line chart: series = [{data:[y|null], color, axis:"l"|"r", dash}]
+function lineChart(cv, series, opt = {}) {
+  const dpr = devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const g = cv.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, W, H);
+  const n = Math.max(0, ...series.map(s => s.data.length));
+  if (n < 2) { g.fillStyle = "#8b95a5"; g.font = "13px system-ui"; g.fillText(opt.empty || "waiting for data…", 12, 24); return; }
+  const pad = {l: 8, r: 64, t: 10, b: 20};
+  const range = ax => { const v = series.filter(s => (s.axis || "l") === ax).flatMap(s => s.data).filter(x => x != null && isFinite(x));
+    if (!v.length) return null; let lo = opt[ax + "min"] ?? Math.min(...v), hi = opt[ax + "max"] ?? Math.max(...v); if (hi === lo) { hi += 1; lo -= 1; } return [lo, hi]; };
+  const R = {l: range("l"), r: range("r")};
+  const X = i => pad.l + i / (n - 1) * (W - pad.l - pad.r);
+  const Y = (v, ax) => { const [lo, hi] = R[ax]; return pad.t + (1 - (v - lo) / (hi - lo)) * (H - pad.t - pad.b); };
+  g.strokeStyle = "#2a313c"; g.fillStyle = "#8b95a5"; g.font = "11px ui-monospace,monospace"; g.lineWidth = 1;
+  const [lo, hi] = R.l || R.r, ax0 = R.l ? "l" : "r";
+  for (let k = 0; k <= 4; k++) { const v = lo + (hi - lo) * k / 4, y = Y(v, ax0);
+    g.beginPath(); g.moveTo(pad.l, y); g.lineTo(W - pad.r, y); g.stroke(); g.fillText(fmt(v, opt.dec ?? 2), W - pad.r + 6, y + 4); }
+  (opt.bands || []).forEach(b => { g.strokeStyle = "#5c6675"; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(pad.l, Y(b, "l")); g.lineTo(W - pad.r, Y(b, "l")); g.stroke(); g.setLineDash([]); });
+  (opt.marks || []).forEach(m => { g.strokeStyle = "#2a313c"; g.beginPath(); g.moveTo(X(m.i), pad.t); g.lineTo(X(m.i), H - pad.b); g.stroke(); g.fillStyle = "#8b95a5"; g.fillText(m.label, X(m.i) + 3, H - 6); });
+  series.forEach(s => { const ax = s.axis || "l"; if (!R[ax]) return; g.strokeStyle = s.color; g.lineWidth = s.width || 1.6; g.setLineDash(s.dash || []);
+    g.beginPath(); let on = false; s.data.forEach((v, i) => { if (v == null) { on = false; return; } const x = X(i), y = Y(v, ax); on ? g.lineTo(x, y) : g.moveTo(x, y); on = true; }); g.stroke(); g.setLineDash([]); });
+}
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+// ---------- tabs
+let tab = location.hash.slice(1) || "training";
+function showTab(t) { tab = t; location.hash = t;
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
+  document.querySelectorAll(".tab").forEach(d => d.classList.toggle("on", d.id === "tab-" + t)); redraw(); }
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
+
+// ---------- experiments
+let eid = null;
+async function loadExperiments() {
+  try { const xs = await j("/api/experiments"); const sel = $("exp"), cur = sel.value;
+    sel.innerHTML = xs.length ? xs.map(e => `<option value="${esc(e.id)}">${esc(e.name || e.id)} · ${esc(e.state)} · ${new Date(e.created * 1000).toLocaleString()}</option>`).join("") : `<option value="">(none yet)</option>`;
+    if (cur && xs.some(e => e.id === cur)) sel.value = cur;
+    const nxt = sel.value || null; if (nxt !== eid) { eid = nxt; refreshExperiment(); }
+  } catch (e) { $("exp").innerHTML = `<option>API error</option>`; }
+}
+$("exp").onchange = () => { eid = $("exp").value || null; refreshExperiment(); };
+
+// ---------- training
+let train = null;
+async function refreshTraining() {
+  if (!eid) return;
+  try { train = await j(`/api/experiments/${encodeURIComponent(eid)}/training`); $("trDot").className = "dot on"; }
+  catch (e) { $("trDot").className = "dot err"; $("trNote").textContent = e.message; return; }
+  const g = train.generations, last = g[g.length - 1], st = train.state;
+  const running = !/COMPLETED|ABORTED|FAILED/.test(st);
+  const per = last?.generations || train.plan.generations || 0, folds = last?.folds || 1;
+  const done = g.length, total = per * folds;
+  $("trBar").style.width = total ? Math.min(100, done / total * 100).toFixed(1) + "%" : "0";
+  $("trNote").textContent = running ? "live · refreshes every 2s" : "finished";
+  const best = g.length ? Math.max(...g.map(x => x.best)) : null;
+  $("trStats").innerHTML = [
+    stat("State", pill(st), "", true),
+    stat("Fold", last ? `${last.fold + 1} / ${folds}` : "—", "", true),
+    stat("Generation", last ? `${last.gen + 1} / ${per}` : "—", "", true),
+    stat("Progress", total ? `${done} / ${total}` : "—", "", true),
+    stat("Best fitness (now)", fmt(last?.best, 4), cls(last?.best)),
+    stat("Best ever", fmt(best, 4), cls(best)),
+    stat("Mean fitness", fmt(last?.mean, 4), cls(last?.mean)),
+    stat("Valid genes", last?.valid != null ? `${last.valid} / ${last.population}` : "—", last?.valid ? "up" : "warn"),
+    stat("Failed risk", last ? last.failed_risk : "—", last?.failed_risk ? "down" : ""),
+    stat("Sec / gen", fmt(last?.seconds, 2), "", true),
+  ].join("");
+  $("stages").innerHTML = table([["Stage"], ["Fold", "num"], ["When"]], train.states.slice().reverse().map(s =>
+    `<tr><td>${pill(s.to)}${s.reason ? ` <span class="muted">${esc(s.reason)}</span>` : ""}</td><td class="num">${s.fold != null ? s.fold + 1 : ""}</td><td class="muted">${ago(s.ts)}</td></tr>`));
+  $("gens").innerHTML = table([["Fold", "num"], ["Gen", "num"], ["Best", "num"], ["Mean", "num"], ["Valid", "num"], ["Failed", "num"], ["Best gene"]],
+    g.slice().reverse().map(x => `<tr><td class="num">${x.fold + 1}</td><td class="num">${x.gen + 1}</td><td class="num ${cls(x.best)}">${fmt(x.best, 4)}</td><td class="num ${cls(x.mean)}">${fmt(x.mean, 4)}</td><td class="num">${x.valid ?? "—"}/${x.population ?? "—"}</td><td class="num">${x.failed_risk}</td><td class="mono muted">${esc(x.best_id)}</td></tr>`));
+  $("verdicts").innerHTML = table([["Fold", "num"], ["Gene"], ["Judge"], ["Status"], ["Why"]],
+    train.verdicts.slice().reverse().map(v => `<tr><td class="num">${v.fold + 1}</td><td class="mono">${esc(v.id)}</td><td>${pill(v.verdict)}</td><td>${pill(v.status)}</td><td class="wrap muted">${esc((v.flags || []).join(", ") || v.rationale || "")}</td></tr>`));
+  drawTraining();
+  if (!running) refreshFinal();
+}
+function drawTraining() {
+  if (!train || tab !== "training") return;
+  const g = train.generations, marks = [];
+  g.forEach((x, i) => { if (x.gen === 0) marks.push({i, label: "fold " + (x.fold + 1)}); });
+  lineChart($("fitChart"), [
+    {data: g.map(x => x.best), color: css("--up"), width: 2},
+    {data: g.map(x => x.mean), color: css("--accent")},
+    {data: g.map(x => x.population ? x.valid / x.population * 100 : null), color: css("--warn"), axis: "r", dash: [4, 3]},
+  ], {marks, dec: 3, rmin: 0, rmax: 100, empty: "no generations yet — training starts after data validation and feature build"});
+}
+async function refreshFinal() {
+  if (!eid) return;
+  try { const f = await j(`/api/experiments/${encodeURIComponent(eid)}/final`);
+    const rows = f.final?.rows || f.final?.ranking || f.final || [];
+    $("ranking").innerHTML = Array.isArray(rows) && rows.length ? table([["#"], ["Gene"], ["Status"], ["Fold", "num"], ["Windows", "num"], ["Consistency", "num"], ["Adj. net", "num"], ["Holdout net", "num"]],
+      rows.map((r, i) => `<tr><td>${i + 1}</td><td class="mono">${esc(r.id)}</td><td>${pill(r.status)}</td><td class="num">${r.fold != null ? r.fold + 1 : ""}</td><td class="num">${r.windows ?? ""}</td><td class="num">${fmt(r.consistency * 100, 0)}%</td><td class="num ${cls(r.rank_net)}">${fmt(r.rank_net)}</td><td class="num ${cls(r.holdout?.net_pnl)}">${fmt(r.holdout?.net_pnl)}</td></tr>`))
+      : `<div class="empty">No ranking yet (it is written when training reaches the final stage).</div>`;
+    const narr = f.narration || [];
+    $("narration").innerHTML = narr.length ? narr.flatMap(n => (n.narration || n.items || [n]).map(x =>
+      `<div class="narr ${x.ok === false || x.error ? "bad" : ""}"><div class="muted mono">${esc(n.id || n.scope || "")} ${esc(x.decision_id || "")} · ${esc(n.provider || x.provider || "")}</div>${esc(x.text || x.narration || x.reason || x.error || JSON.stringify(x).slice(0, 400))}</div>`)).join("")
+      : `<div class="empty">No narration saved yet. Run <code>python -m app.cli explain --experiment latest</code>.</div>`;
+  } catch (e) { $("ranking").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+
+// ---------- live testnet
+let live = null, liveWs = null;
+function connectLive() {
+  if (liveWs) liveWs.close();
+  const ws = liveWs = new WebSocket(`${wsBase}/ws/live/${$("sym").value}?tf=${$("tf").value}`);
+  ws.onmessage = m => { const d = JSON.parse(m.data); if (d.error) { $("liveDot").className = "dot err"; $("liveAge").textContent = d.error; return; }
+    live = d; $("liveDot").className = "dot on"; renderLive(); };
+  ws.onclose = () => { if (ws === liveWs) { $("liveDot").className = "dot err"; setTimeout(connectLive, 3000); } };
+}
+function renderLive() {
+  if (!live) return; const d = live;
+  $("liveAge").textContent = "updated " + ago(d.server_time);
+  $("liveStats").innerHTML = [stat("Last", fmt(d.last)), stat("24h", pct(d.change_pct / 100), cls(d.change_pct)), stat("Mark", fmt(d.mark), "", true),
+    stat("Index", fmt(d.index), "", true), stat("Funding", pct(d.funding_rate, 4), cls(d.funding_rate), true),
+    stat("24h high / low", `${fmt(d.high_24h)} / ${fmt(d.low_24h)}`, "", true), stat("24h volume", big(d.quote_volume_24h), "", true)].join("");
+  if (tab === "live") { const c = d.candles; $("chartNote").textContent = `${c.length} candles · last one forming`;
+    lineChart($("chart"), [{data: c.map(x => x[4]), color: css("--accent"), width: 2}, {data: c.map(x => x[2]), color: css("--dim"), width: 1}, {data: c.map(x => x[3]), color: css("--dim"), width: 1}]); }
+}
+let liveEv = [];
+async function refreshLiveEvents() {
+  if (!eid) return;
+  try { liveEv = await j(`/api/experiments/${encodeURIComponent(eid)}/live`); } catch { return; }
+  const dec = liveEv.filter(e => e.type === "decision"), started = liveEv.filter(e => e.type === "live_started").pop();
+  const lastD = dec[dec.length - 1], orders = liveEv.filter(e => e.type === "order");
+  const halted = liveEv.filter(e => e.type === "halted").pop();
+  $("ftStats").innerHTML = liveEv.length ? [stat("Mode", esc(started?.payload.mode || "—"), started?.payload.mode === "DRY_RUN" ? "warn" : "up", true),
+    stat("Decisions", dec.length), stat("Orders", orders.length), stat("Last decision", lastD ? ago(lastD.ts) : "—", "", true),
+    stat("Equity", fmt(lastD?.payload.equity)), stat("Status", halted ? pill("halted") : pill("running"), "", true)].join("") : `<div class="empty">No live/dry-run activity for this experiment yet.</div>`;
+  $("liveEvents").innerHTML = table([["When"], ["Event"], ["Side"], ["Risk"], ["Qty", "num"], ["Detail"]], liveEv.slice().reverse().map(e => { const p = e.payload;
+    const side = p.proposal?.side, risk = p.risk?.outcome, qty = p.entry?.qty ?? p.risk?.approved_qty ?? p.qty;
+    const det = p.blocked || p.reason || (p.dry_run_order ? "dry-run: order not sent" : "") || (p.risk?.reasons || []).join(", ") || p.error || "";
+    return `<tr><td class="muted">${time(e.ts)}</td><td>${pill(e.type)}</td><td>${side ? pill(side) : ""}</td><td>${risk ? pill(risk) : ""}</td><td class="num">${qty != null ? fmt(qty, 4) : ""}</td><td class="wrap muted">${esc(det)}</td></tr>`; }));
+  renderPastDebates();
+}
+async function refreshLlm() { try { const s = await j("/api/llm");
+  $("llmDot").className = "dot " + (s.configured || s.ok ? "on" : "err");
+  $("llmInfo").textContent = [s.configured ? "configured" : "not configured", s.base_url, s.model, s.missing?.length ? "missing " + s.missing.join(", ") : ""].filter(Boolean).join(" · "); } catch {} }
+
+// ---------- debate & indicators
+let an = null;
+async function refreshAnalysis() {
+  try { an = await j(`/api/analysis/${$("sym").value}?tf=${$("tf").value}&limit=300`); $("anDot").className = "dot on"; }
+  catch (e) { $("anDot").className = "dot err"; $("anNote").textContent = e.message; return; }
+  $("anNote").textContent = an.bar_ts ? `${an.symbol} · candle ${time(an.bar_ts)} · refreshes every 15s` : "";
+  const d = an.debate;
+  if (!d) { $("verdict").innerHTML = `<div class="empty">Not enough evidence: ${esc((an.warnings || []).join(", "))}</div>`; $("bull").innerHTML = $("bear").innerHTML = ""; }
+  else {
+    const pos = (d.score + 1) / 2 * 100;
+    $("verdict").innerHTML = `<div class="stats">${stat("Recommendation", pill(d.recommendation), "", true)}${stat("Debate score", fmt(d.score, 3), cls(d.score))}
+      ${stat("Price", fmt(an.evidence.price?.close))}${stat("Trend", esc(an.evidence.regime?.trend), "", true)}</div>
+      <div style="margin-top:14px" class="meter"><i style="left:calc(${pos}% - 2px)"></i></div>
+      <div class="legend" style="justify-content:space-between;margin-top:4px"><span>bear −1</span><span>no trade (±0.2)</span><span>bull +1</span></div>`;
+    const side = (t, title) => !t ? "" : `<h2>${title} <span class="note">uncertainty ${fmt(t.uncertainty, 2)}</span></h2>
+      ${t.claims.length ? `<ul>${t.claims.map(c => `<li>${esc(c.text)} <span class="muted mono">w=${c.weight} · ${esc(c.evidence_id.split(":")[1])}</span></li>`).join("")}</ul>` : `<div class="empty">No supporting claim.</div>`}
+      <div class="muted">↳ ${esc((t.counterarguments || []).join("; "))}</div><div class="muted">Invalidation: ${esc(t.invalidation)}</div>`;
+    $("bull").innerHTML = side(d.turns.find(t => t.role === "bull"), "Bull (speaks first)");
+    $("bear").innerHTML = side(d.turns.find(t => t.role === "bear"), "Bear (rebuts)");
+  }
+  $("analysts").innerHTML = (an.analysts || []).map(a => `<div class="narr ${a.insufficient_evidence ? "bad" : ""}"><b>${esc(a.role)}</b><div>${esc(a.summary)}</div>${a.missing?.length ? `<div class="down">missing: ${esc(a.missing.join(", "))}</div>` : ""}</div>`).join("") || `<div class="empty">—</div>`;
+  $("evidence").innerHTML = Object.entries(an.evidence || {}).map(([k, v]) => `<div><b>${esc(k)}</b>${esc(Object.entries(v || {}).map(([a, b]) => `${a}: ${typeof b === "object" && b ? JSON.stringify(b) : b}`).join("\n"))}</div>`).join("").replace(/\n/g, "<br>");
+  drawIndicators();
+}
+function drawIndicators() {
+  if (!an || tab !== "debate") return; const s = an.series, c = an.candles;
+  lineChart($("emaChart"), [{data: c.map(x => x[4]), color: css("--text"), width: 1.4}, {data: s.ema20, color: css("--accent")}, {data: s.ema50, color: css("--violet")}]);
+  lineChart($("rsiChart"), [{data: s.rsi14, color: css("--warn")}], {lmin: 0, lmax: 100, bands: [30, 70], dec: 0});
+  lineChart($("atrChart"), [{data: s.atr14, color: css("--down")}]);
+}
+function renderPastDebates() {
+  const dec = liveEv.filter(e => e.type === "decision" && e.payload.discussion).slice(-30).reverse();
+  $("pastDebates").innerHTML = table([["When"], ["Debate"], ["Score", "num"], ["Trader"], ["Risk gate"], ["Strongest bull"], ["Strongest bear"]], dec.map(e => { const d = e.payload.discussion;
+    const top = r => { const t = d.turns.find(x => x.role === r); const c = (t?.claims || []).slice().sort((a, b) => b.weight - a.weight)[0]; return c ? esc(c.text) : "—"; };
+    return `<tr><td class="muted">${time(e.ts)}</td><td>${pill(d.recommendation)}</td><td class="num ${cls(d.score)}">${fmt(d.score, 3)}</td><td>${pill(e.payload.proposal?.side || "—")}</td><td>${pill(e.payload.risk?.outcome || "—")}</td><td class="wrap">${top("bull")}</td><td class="wrap">${top("bear")}</td></tr>`; }));
+}
+
+function refreshExperiment() { train = null; liveEv = []; refreshTraining(); refreshFinal(); refreshLiveEvents(); }
+function redraw() { drawTraining(); renderLive(); drawIndicators(); }
+$("sym").onchange = $("tf").onchange = () => { connectLive(); refreshAnalysis(); };
+addEventListener("resize", redraw);
+
+showTab(tab); loadExperiments(); connectLive(); refreshAnalysis(); refreshLlm();
+setInterval(loadExperiments, 5000);
+setInterval(refreshTraining, 2000);
+setInterval(refreshLiveEvents, 3000);
+setInterval(refreshAnalysis, 15000);
+setInterval(refreshLlm, 30000);
+</script>
+</body>
+</html>

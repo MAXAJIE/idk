@@ -1,0 +1,85 @@
+{
+  "name": "binance-btcusdt-1h",
+  "data": {
+    "source": "binance",
+    "symbol": "BTCUSDT",
+    "exchange": "BINANCE_USDM",
+    "timeframe_minutes": 60,
+    "n_bars": 3000,
+    "synthetic_seed": 7,
+    "max_gap_bars": 0,
+    "backend": "rest"
+  },
+  "costs": {
+    "taker_fee_bps": 5.0,
+    "maker_fee_bps": 2.0,
+    "half_spread_bps": 1.5,
+    "slippage_base_bps": 1.0,
+    "slippage_impact_coef": 2.0,
+    "slippage_vol_coef": 0.05,
+    "funding_interval_bars": 8
+  },
+  "risk": {
+    "version": "risk-1",
+    "initial_equity": 10000.0,
+    "max_risk_per_trade_frac": 0.01,
+    "max_leverage": 3.0,
+    "max_concurrent_positions": 1,
+    "max_bar_volume_frac": 0.01,
+    "max_spread_bps": 10.0,
+    "max_cost_to_reward": 0.35,
+    "min_liq_distance_to_stop": 2.0,
+    "maintenance_margin_frac": 0.005,
+    "stress_gap_mult": 2.0,
+    "max_stress_loss_frac": 0.025,
+    "hard_drawdown_frac": 0.2,
+    "max_data_staleness_bars": 1
+  },
+  "gates": {
+    "min_trades": 8,
+    "max_drawdown_frac": 0.15,
+    "min_net_return": 0.0,
+    "min_stop_compliance": 0.95,
+    "max_cost_share_of_gross": 0.6
+  },
+  "judge": {
+    "windfall_dominance_frac": 0.5,
+    "windfall_range_atr_mult": 3.0,
+    "systemic_windfall_count": 2
+  },
+  "wfa": {
+    "n_folds": 3,
+    "is_bars": 900,
+    "oos_bars": 400,
+    "embargo_bars": 24,
+    "holdout_bars": 300,
+    "min_consistency_frac": 0.5,
+    "min_oos_folds": 1
+  },
+  "ga": {
+    "population": 16,
+    "generations": 4,
+    "elite_size": 3,
+    "tournament_k": 3,
+    "crossover_rate": 0.7,
+    "mutation_rate": 0.15,
+    "seed": 42
+  },
+  "reward": {
+    "downside_penalty": 1.0,
+    "drawdown_penalty": 0.5,
+    "cost_penalty": 0.5,
+    "violation_penalty": 1.0
+  },
+  "llm": {
+    "provider": "auto",
+    "narrate": "elite_only",
+    "max_narrated_decisions": 6,
+    "timeout_s": 30.0
+  },
+  "live": {
+    "base_url": "https://testnet.binancefuture.com",
+    "signal_source": "testnet",
+    "close_grace_s": 5.0
+  }
+}
