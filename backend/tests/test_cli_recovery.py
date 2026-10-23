@@ -9,7 +9,7 @@ import pytest
 from app.agents.narration import explain_experiment, explain_records
 from app.agents.provider import FailedProvider, LLMError, OpenAICompatibleProvider, get_provider, llm_status
 from app.genetic.population import initial
-from app.live.runner import LiveTrader, pick_chromosome, resolve_experiment
+from app.live.runner import LiveTrader, find_best_chromosome, pick_chromosome, resolve_experiment
 from app.live.testnet import SymbolRules
 from app.persistence.db import Store
 
@@ -65,6 +65,52 @@ def test_qualified_selection(tmp_path, cfg):
     st.put("exp_real", "final", "ranking", {"ranking": [{"status": "QUALIFIED", "chromosome": c.to_dict()}]})
     assert pick_chromosome(st, "exp_real").id == c.id
 
+
+
+def test_best_auto_selects_highest_scoring_qualified_arena_champion(tmp_path, cfg):
+    import random
+    from app.genetic.operators import random_chromosome
+    st = research(tmp_path, cfg)
+    low, high, rejected = (random_chromosome(random.Random(seed)) for seed in (101, 102, 103))
+    st.create_experiment("arena_low", "arena:BTCUSDT", cfg.model_dump())
+    st.set_state("arena_low", "COMPLETED")
+    st.put("arena_low", "arena", "result", {
+        "champion": low.to_dict(), "champion_oos_pnl": 40.0, "champion_consistency": 0.9,
+        "combatants": []
+    })
+    st.create_experiment("arena_high", "arena:BTCUSDT", cfg.model_dump())
+    st.set_state("arena_high", "COMPLETED")
+    st.put("arena_high", "arena", "result", {
+        "champion": high.to_dict(), "champion_oos_pnl": 100.0, "champion_consistency": 0.8,
+        "combatants": [{"chromosome": rejected.to_dict(), "qualified": False, "oos_pnl": 9999, "consistency": 1.0}]
+    })
+    chromo, eid, meta = find_best_chromosome(st)
+    assert chromo.id == high.id
+    assert eid == "arena_high"
+    assert meta["type"] == "arena_champion"
+
+
+def test_live_startup_reconciles_open_exchange_position(tmp_path, cfg):
+    st = research(tmp_path, cfg)
+    class Exchange:
+        base = "https://testnet.binancefuture.com"
+        def rules(self, symbol):
+            return SymbolRules(step=.001, min_qty=.001, tick=.1, min_notional=5)
+        def equity(self):
+            return 1000.0
+        def position(self, symbol):
+            return {"qty": -0.0692, "entry": 81722.4, "upnl": 12.3, "realized_pnl": None}
+        def open_orders(self, symbol):
+            return [{"type": "STOP_MARKET"}, {"type": "TAKE_PROFIT_MARKET"}]
+    live = LiveTrader(cfg, chromosome(), st, Exchange(), str(tmp_path / "restart.json"), False,
+                      str(tmp_path / "NO_KILL"))
+    events = st.events(live.eid, limit=100)
+    restored = next(e for e in events if e["type"] == "position_reconnected")["payload"]
+    assert restored["qty"] == -0.0692
+    assert restored["entry"] == 81722.4
+    assert restored["protective_orders"] == 2
+    assert live.st["position_qty"] == -0.0692
+    assert live.st["opened_ts"] is not None
 
 def test_explicit_research_fallback_for_empty_archive(tmp_path, cfg):
     st = research(tmp_path, cfg)

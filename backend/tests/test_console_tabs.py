@@ -63,3 +63,60 @@ def test_training_api_includes_arena_progress_and_results(tmp_path):
     assert data["plan"]["mode"] == "arena" and data["plan"]["auto"] is True
     assert data["generations"][0]["round"] == 2
     assert data["arena_result"]["champion"]["id"] == "chr_a"
+
+
+def test_api_experiments_categorizes_live_and_training(tmp_path):
+    store = Store(tmp_path / "exp_cat.sqlite")
+    # Training experiment
+    store.create_experiment("train_1", "arena:BTCUSDT", {"mode": "arena"})
+    # Live testnet experiment
+    store.create_experiment("live_1", "testnet:BTCUSDT", {
+        "chromosome": {
+            "id": "chr_champion",
+            "genes": {
+                "trend": {"ema_fast": 20, "ema_slow": 50},
+                "stop_target": {"stop_atr": 2.0, "rr": 1.5}
+            }
+        }
+    })
+    store.set_state("live_1", "LIVE_TESTNET")
+
+    c = TestClient(create_app(str(tmp_path / "exp_cat.sqlite")))
+    res = c.get("/api/experiments").json()
+    assert len(res) == 2
+    live_exp = next(x for x in res if x["id"] == "live_1")
+    train_exp = next(x for x in res if x["id"] == "train_1")
+    
+    assert live_exp["category"] == "live"
+    assert live_exp["chromosome_id"] == "chr_champion"
+    assert train_exp["category"] == "training"
+    assert train_exp["chromosome_id"] is None
+
+    # Test chromosomes fallback for live session
+    ch_res = c.get("/api/experiments/live_1/chromosomes").json()
+    assert len(ch_res) == 1
+    assert ch_res[0]["id"] == "chr_champion"
+    assert ch_res[0]["body"]["genes"]["trend"]["ema_fast"] == 20
+
+
+def test_root_console_has_separated_views(tmp_path):
+    Store(tmp_path / "ui.sqlite")
+    c = TestClient(create_app(str(tmp_path / "ui.sqlite")))
+    html = c.get("/console").text
+    assert 'data-tab="training"' in html
+    assert 'data-tab="live"' in html
+    assert 'id="trainExpSelect"' in html
+    assert 'id="liveExpSelect"' in html
+    assert 'id="trainHistoryTable"' in html
+    assert 'Active Chromosome in Live Trading' in html
+    assert 'id="hdrTraining"' in html
+    assert 'id="hdrLive"' in html
+
+
+def test_websocket_stream_disconnect(tmp_path):
+    store = Store(tmp_path / "ws.sqlite")
+    client = TestClient(create_app(str(tmp_path / "ws.sqlite")))
+    with client.websocket_connect("/ws/live/BTCUSDT?tf=60") as ws:
+        _ = ws.receive_json()
+        # Normal client close
+        ws.close()

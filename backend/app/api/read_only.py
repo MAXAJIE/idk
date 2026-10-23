@@ -7,6 +7,10 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+try:
+    from websockets.exceptions import ConnectionClosed
+except ImportError:
+    ConnectionClosed = WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
@@ -56,7 +60,24 @@ def create_app(db_path: str = DB) -> FastAPI:
 
     @app.get("/api/experiments")
     def experiments():
-        return [{k: e[k] for k in ("id", "name", "created", "state")} for e in store.experiments()]
+        out = []
+        for e in store.experiments():
+            name = e.get("name") or ""
+            state = e.get("state") or ""
+            cfg = e.get("config") or {}
+            is_live = name.startswith("testnet:") or state in ("LIVE_TESTNET", "LIVE_DRY_RUN") or "live_" in e.get("id", "")
+            category = "live" if is_live else "training"
+            chromo = cfg.get("chromosome") if isinstance(cfg, dict) else None
+            chromo_id = chromo.get("id") if isinstance(chromo, dict) else None
+            out.append({
+                "id": e["id"],
+                "name": e["name"],
+                "created": e["created"],
+                "state": e["state"],
+                "category": category,
+                "chromosome_id": chromo_id,
+            })
+        return out
 
     @app.get("/api/experiments/{eid}")
     def experiment(eid: str):
@@ -75,7 +96,13 @@ def create_app(db_path: str = DB) -> FastAPI:
 
     @app.get("/api/experiments/{eid}/chromosomes")
     def chromosomes(eid: str):
-        return store.artifacts(eid, "chromosome")
+        arts = store.artifacts(eid, "chromosome")
+        if not arts:
+            e = next((x for x in store.experiments() if x["id"] == eid), None)
+            if e and isinstance(e.get("config"), dict) and e["config"].get("chromosome"):
+                c = e["config"]["chromosome"]
+                return [{"id": c.get("id", "active"), "key": "active", "body": c}]
+        return arts
 
     @app.get("/api/experiments/{eid}/candidates")
     def candidates(eid: str):
@@ -160,10 +187,15 @@ def create_app(db_path: str = DB) -> FastAPI:
                 try:
                     d = await asyncio.to_thread(live_market.snapshot, symbol, tf, 120)
                     await ws.send_json(d)
+                except (WebSocketDisconnect, ConnectionClosed):
+                    return
                 except (ValueError, OSError) as e:
-                    await ws.send_json({"error": f"{type(e).__name__}: {str(e)[:160]}"})
+                    try:
+                        await ws.send_json({"error": f"{type(e).__name__}: {str(e)[:160]}"})
+                    except (WebSocketDisconnect, ConnectionClosed):
+                        return
                 await asyncio.sleep(2.0)
-        except WebSocketDisconnect:
+        except (WebSocketDisconnect, ConnectionClosed):
             return
 
     @app.websocket("/ws/{eid}")
@@ -176,7 +208,7 @@ def create_app(db_path: str = DB) -> FastAPI:
                     await ws.send_json(r)
                     after = r["seq"]
                 await asyncio.sleep(1.0)  # inbound messages are never read
-        except WebSocketDisconnect:
+        except (WebSocketDisconnect, ConnectionClosed):
             return
 
     @app.get("/{path:path}", include_in_schema=False)

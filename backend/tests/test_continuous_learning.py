@@ -113,14 +113,10 @@ def test_arena_train_and_combat_anti_overfitting():
 
     res = train_and_combat(bars, cfg, pop_size=8, generations=2, elite_pool_size=4,
                            min_consistency=0.5, seed=999)
-    assert res.total_spawned >= 8
-    assert isinstance(res.combatants, list)
-    assert res.summary != ""
-    # Verify every combatant evaluated WFA consistency and neighbour retention
-    for c in res.combatants:
-        assert hasattr(c, "consistency")
-        assert hasattr(c, "neighbour_retention")
-        assert hasattr(c, "qualified")
+    # The fixture cannot support the configured independent OOS windows and holdout.
+    assert res.total_spawned == 0
+    assert res.combatants == []
+    assert "insufficient valid walk-forward history" in res.summary
 
 
 def test_auto_train_until_survivor_and_analysis_reporting():
@@ -137,11 +133,11 @@ def test_auto_train_until_survivor_and_analysis_reporting():
         bars, cfg, pop_size=6, generations=2, elite_pool_size=3,
         min_consistency=0.5, seed=42, max_rounds=2
     )
-    assert rounds >= 1
-    assert res.total_spawned >= 6
+    assert rounds == 2
+    assert res.total_spawned == 0
     report = analyze_arena_result(res, cfg, round_num=rounds)
     assert "ARENA COMBAT & ANTI-OVERFITTING ANALYSIS REPORT" in report
-    assert "Status:" in report
+    assert "insufficient valid walk-forward history" in report
 
 
 def test_arena_emits_generation_progress_events():
@@ -158,8 +154,41 @@ def test_arena_emits_generation_progress_events():
                      min_consistency=0.5, seed=2026,
                      progress=lambda event_type, payload: events.append((event_type, payload)))
     generations = [payload for event_type, payload in events if event_type == "generation"]
-    assert len(generations) == 2
-    assert [g["gen"] for g in generations] == [0, 1]
-    assert all(g["training_mode"] == "arena" for g in generations)
-    assert all(g["population"] == 6 for g in generations)
-    assert any(payload.get("to") == "ARENA_COMBAT" for event_type, payload in events if event_type == "state")
+    assert generations == []
+    assert any("insufficient valid walk-forward history" in payload.get("reason", "")
+               for event_type, payload in events if event_type == "state")
+
+
+def test_arena_fails_closed_when_valid_wfa_windows_do_not_fit():
+    """Short history must not be recycled as overlapping OOS and holdout data."""
+    from app.learning.arena import train_and_combat
+    cfg = load_config(Path(__file__).parents[1] / "configs/default.json")
+    bars = []
+    price = 100.0
+    for i in range(360):
+        price += 0.4 if i % 3 != 0 else -0.5
+        bars.append(Bar(i=i, ts=1000 + i * 60, open=price - 0.2, high=price + 0.8,
+                        low=price - 0.8, close=price, volume=1500.0, funding_rate=0.0001))
+
+    result = train_and_combat(bars, cfg, pop_size=8, generations=2, seed=7)
+    assert result.champion is None
+    assert result.total_spawned == 0
+    assert "insufficient valid walk-forward history" in result.summary
+
+
+
+def test_arena_records_profitable_oos_fold_count():
+    from app.learning.arena import ArenaCombatant
+    from app.genetic.operators import random_chromosome
+    import random
+
+    record = ArenaCombatant(
+        chromosome=random_chromosome(random.Random(9)),
+        is_pnl=1.0, is_drawdown=0.01, oos_pnl=1.0, oos_drawdown=0.01,
+        consistency=0.5, neighbour_retention=1.0, qualified=False,
+        status_reason="too few profitable OOS folds (1 < 2)",
+        positive_oos_folds=1, total_oos_folds=3,
+    )
+    serialized = record.to_dict()
+    assert serialized["positive_oos_folds"] == 1
+    assert serialized["total_oos_folds"] == 3

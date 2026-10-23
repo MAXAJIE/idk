@@ -40,7 +40,7 @@ def main():
     f.add_argument("--backend", choices=["rest", "ccxt"], default="rest")
     t = sub.add_parser("trade")
     t.add_argument("--config"); t.add_argument("--db", default=DB)
-    t.add_argument("--experiment", required=True); t.add_argument("--dry-run", action="store_true")
+    t.add_argument("--experiment", default="best", help="experiment ID or 'best' for automatic best qualified chromosome (default)"); t.add_argument("--dry-run", action="store_true")
     t.add_argument("--once", action="store_true"); t.add_argument("--allow-unqualified", action="store_true")
     t.add_argument("--state"); t.add_argument("--kill-file", default="KILL")
     t.add_argument("--auto-re-evolve", action="store_true", help="enable rolling walk-forward candidate re-evolution and safe hot-swap")
@@ -81,12 +81,17 @@ def main():
         binance.write_csv(bars, out)
         print(f"{len(bars)} closed bars -> {out}")
     elif a.cmd == "trade":
-        from app.live.runner import LiveTrader, pick_chromosome, resolve_experiment
+        from app.live.runner import LiveTrader, pick_chromosome, resolve_experiment, find_best_chromosome
         from app.live.testnet import TestnetClient
         if a.allow_unqualified and not a.dry_run:
             ap.error("--allow-unqualified requires --dry-run; unqualified strategies may not place orders")
         store = Store(a.db)
-        eid = resolve_experiment(store, a.experiment)
+        if a.experiment in ("best", "auto", "latest"):
+            chromo, eid, pick_meta = find_best_chromosome(store, a.experiment, a.allow_unqualified)
+            print(f"AUTO-SELECTED chromosome {chromo.id} from {eid}: {pick_meta}", flush=True)
+        else:
+            eid = resolve_experiment(store, a.experiment)
+            chromo = pick_chromosome(store, eid, a.allow_unqualified)
         exp = next(e for e in store.experiments() if e["id"] == eid)
         cfg = load_config(backend_path(a.config)) if a.config else ExperimentConfig.model_validate(exp["config"])
         if a.auto_re_evolve:
@@ -95,7 +100,7 @@ def main():
             ap.error("trade requires a Binance research experiment, not synthetic/CSV data")
         state = backend_path(a.state or ("data/dry_state.json" if a.dry_run else "data/live_state.json"))
         print(f"source experiment: {eid}; mode: {'DRY_RUN (no orders)' if a.dry_run else 'BINANCE_TESTNET'}", flush=True)
-        lt = LiveTrader(cfg, pick_chromosome(store, eid, a.allow_unqualified), store,
+        lt = LiveTrader(cfg, chromo, store,
                         TestnetClient(cfg.live.base_url), state, a.dry_run, backend_path(a.kill_file), eid)
         print("live experiment", lt.eid)
         print(lt.loop(1 if a.once else None))

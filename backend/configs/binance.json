@@ -54,7 +54,7 @@
     "embargo_bars": 24,
     "holdout_bars": 300,
     "min_consistency_frac": 0.5,
-    "min_oos_folds": 1
+    "min_oos_folds": 2
   },
   "ga": {
     "population": 16,

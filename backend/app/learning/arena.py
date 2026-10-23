@@ -45,6 +45,8 @@ class ArenaCombatant:
     is_win_rate: float = 0.0
     oos_trades: int = 0
     oos_win_rate: float = 0.0
+    positive_oos_folds: int = 0
+    total_oos_folds: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -101,15 +103,28 @@ def train_and_combat(
     evidence = [pipeline.build(PITView(bars, t)) for t in range(len(bars))]
     ctx = Context(cfg, bars, evidence)
 
-    # 2. Build multi-window walk-forward splits to prevent single-window overfitting
+    # 2. Build independent walk-forward splits. Never turn the same bars into
+    # both OOS and holdout data: that would silently invalidate qualification.
     try:
         folds, holdout = make_folds(len(bars), lookback, cfg.wfa)
-    except Exception:
-        # Fallback to 2-split if dataset cannot satisfy full fold settings
-        mid = lookback + (len(bars) - lookback) // 2
-        from app.validation.walk_forward import Fold
-        folds = [Fold(k=0, is_start=lookback, is_end=mid, oos_start=mid, oos_end=len(bars))]
-        holdout = (mid, len(bars))
+    except (ValueError, AssertionError) as exc:
+        summary = f"insufficient valid walk-forward history: {exc}"
+        if progress:
+            progress("state", {"to": "ARENA_COMPLETED", "reason": summary, "fold": 0})
+        return ArenaResult(
+            champion=None, total_spawned=0, is_survivors=0, oos_qualifiers=0,
+            combatants=[], summary=summary,
+        )
+    if len(folds) < cfg.wfa.min_oos_folds:
+        summary = (f"insufficient independent OOS folds ({len(folds)} < "
+                   f"required {cfg.wfa.min_oos_folds}); increase history or revise WFA windows")
+        if progress:
+            progress("state", {"to": "ARENA_COMPLETED", "reason": summary, "fold": 0})
+        return ArenaResult(
+            champion=None, total_spawned=0, is_survivors=0, oos_qualifiers=0,
+            combatants=[],
+            summary=summary,
+        )
 
     rng = random.Random(seed)
     if progress:
@@ -182,9 +197,18 @@ def train_and_combat(
 
         # Anti-overfitting 1: WFA multi-window consistency check
         oos_results = [simulate(c, ctx, f.oos_start, f.oos_end) for f in folds]
-        positive_folds = [r for r in oos_results if r["scorecard"]["net_return"] > 0
-                          and r["scorecard"]["max_drawdown"] <= cfg.gates.max_drawdown_frac
-                          and not r["failed_risk"]]
+        is_len = max(1, is_fold.is_end - is_fold.is_start)
+        positive_folds = []
+        for fold, result in zip(folds, oos_results):
+            scorecard = result["scorecard"]
+            min_fold_trades = max(
+                2, int(round(cfg.gates.min_trades * ((fold.oos_end - fold.oos_start) / is_len)))
+            )
+            if (scorecard["net_return"] > 0
+                    and scorecard["max_drawdown"] <= cfg.gates.max_drawdown_frac
+                    and scorecard["n_trades"] >= min_fold_trades
+                    and not result["failed_risk"]):
+                positive_folds.append(result)
         consistency = len(positive_folds) / len(folds) if folds else 0.0
 
         # Anti-overfitting 2: Holdout out-of-sample simulation
@@ -214,6 +238,10 @@ def train_and_combat(
         if not gates_passed:
             qualified = False
             reason = f"failed risk gates on holdout: {', '.join(failed_gate_names) if failed_gate_names else 'failed_risk'}"
+        elif len(positive_folds) < cfg.wfa.min_oos_folds:
+            qualified = False
+            reason = (f"too few profitable OOS folds ({len(positive_folds)} < "
+                      f"{cfg.wfa.min_oos_folds})")
         elif consistency < min_consistency:
             qualified = False
             reason = f"low WFA consistency ({consistency:.2f} < {min_consistency:.2f})"
@@ -238,6 +266,8 @@ def train_and_combat(
             is_win_rate=round(is_res["scorecard"]["win_rate"] or 0.0, 4),
             oos_trades=h_res["scorecard"]["n_trades"],
             oos_win_rate=round(h_res["scorecard"]["win_rate"] or 0.0, 4),
+            positive_oos_folds=len(positive_folds),
+            total_oos_folds=len(folds),
         )
         combatant_records.append(record)
 
@@ -350,12 +380,32 @@ def analyze_arena_result(res: ArenaResult, cfg: ExperimentConfig, round_num: int
             "-" * 64,
             "Failure Analysis / Gate Blockers:",
         ])
+        if not res.combatants and res.summary:
+            lines.append(f"  {res.summary}")
+        if res.combatants:
+            from collections import Counter
+            blockers = Counter()
+            for combatant in res.combatants:
+                if combatant.qualified:
+                    continue
+                reason = combatant.status_reason
+                prefix = "failed risk gates on holdout:"
+                if reason.startswith(prefix):
+                    blockers.update(f"holdout gate: {name.strip()}"
+                                    for name in reason[len(prefix):].split(",") if name.strip())
+                else:
+                    blockers[reason.split("(", 1)[0].strip()] += 1
+            lines.append("  Most common blockers:")
+            lines.extend(f"    - {reason}: {count}/{len(res.combatants)} candidates"
+                         for reason, count in blockers.most_common(5))
         for idx, c in enumerate(res.combatants[:6]):
             lines.append(f"  Candidate {idx+1} ({c.chromosome.id}): {c.status_reason}")
             lines.append(f"    IS PnL: {c.is_pnl:.2f} | OOS PnL: {c.oos_pnl:.2f} | Consistency: {c.consistency:.2f} | Retention: {c.neighbour_retention:.2f}")
         lines.extend([
             "-" * 64,
-            "Recommendation: Run with `--auto --max-rounds 10` or adjust `--min-consistency 0.5`.",
+            "Recommendation: Do not lower gates or keep rerolling seeds against the same history. "
+            "Use the blocker counts above to diagnose the limiting metric; collect more independent "
+            "history or revise the strategy/search space, then reserve a fresh holdout for one final check.",
             "=" * 64,
         ])
         return "\n".join(lines)

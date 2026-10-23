@@ -29,7 +29,8 @@
   .stat .k{font-size:13px;color:var(--muted)}.stat .v{font:600 22px/1.3 var(--mono)}.stat .v.sm{font-size:16px}
   .up{color:var(--up)}.down{color:var(--down)}.warn{color:var(--warn)}.muted{color:var(--muted)}.mono{font-family:var(--mono)}
   .dot{width:8px;height:8px;border-radius:50%;background:var(--dim);display:inline-block}
-  .dot.on{background:var(--up);box-shadow:0 0 6px var(--up)}.dot.err{background:var(--down)}
+  .dot.on{background:var(--up);box-shadow:0 0 6px var(--up)}.dot.err{background:var(--down)}.dot.pulse{background:var(--accent);box-shadow:0 0 8px var(--accent);animation:blink 1.4s infinite}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
   canvas{width:100%;height:300px;display:block}canvas.short{height:150px}
   table{width:100%;border-collapse:collapse;font-size:14px}tbody tr:nth-child(even){background:#131820}tbody tr:hover{background:var(--panel2)}
   th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -52,34 +53,78 @@
   .empty{color:var(--muted);padding:12px 0}
   code{font-family:var(--mono);background:var(--panel2);padding:1px 5px;border-radius:4px}
   .note{font-size:12px;color:var(--dim);font-weight:400;text-transform:none;letter-spacing:0}
+
+  /* Chromosome card styling */
+  .chromo-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:12px}
+  .chromo-block{background:var(--panel2);border-radius:8px;padding:12px 14px;border-top:2px solid var(--accent)}
+  .chromo-block h3{margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:600}
+  .chromo-row{display:flex;justify-content:space-between;margin-bottom:4px;font-size:13px;align-items:center}
+  .chromo-row .k{color:var(--dim)}
+  .chromo-row .v{font-family:var(--mono);font-weight:600;color:var(--text)}
+
+  /* Training history table styling */
+  .row-active{background:rgba(74,168,255,0.12)!important}
+  .btn-sm{background:none;border:1px solid var(--line);color:var(--text);border-radius:4px;padding:3px 8px;font:inherit;font-size:12px;cursor:pointer}
+  .btn-sm:hover{border-color:var(--accent);color:var(--accent)}
+  .btn-sm.active{border-color:var(--accent);background:var(--accent);color:#000;font-weight:600}
 </style>
 </head>
 <body>
 <header>
   <h1>CGTRS <small>read-only console · paper / testnet only</small></h1>
   <div class="grow"></div>
-  <label class="muted">Market
-    <select id="sym"><option>BTCUSDT</option><option>ETHUSDT</option><option>SOLUSDT</option><option>BNBUSDT</option></select>
-    <select id="tf"><option value="1">1m</option><option value="5">5m</option><option value="15">15m</option>
-      <option value="60" selected>1h</option><option value="240">4h</option><option value="1440">1d</option></select>
-  </label>
-  <label class="muted">Experiment <select id="exp"></select></label>
+
+  <!-- Contextual header controls: Training Mode -->
+  <div id="hdrTraining" style="display:flex;align-items:center;gap:10px">
+    <span id="trStatusBadge" class="pill muted">TRAINING</span>
+    <label class="muted">Training Run <select id="trainExpSelect"></select></label>
+  </div>
+
+  <!-- Contextual header controls: Live Mode -->
+  <div id="hdrLive" style="display:none;align-items:center;gap:10px">
+    <span id="liveStatusBadge" class="pill up">LIVE TESTNET</span>
+    <label class="muted">Market
+      <select id="sym"><option>BTCUSDT</option><option>ETHUSDT</option><option>SOLUSDT</option><option>BNBUSDT</option></select>
+      <select id="tf"><option value="1">1m</option><option value="5">5m</option><option value="15">15m</option>
+        <option value="60" selected>1h</option><option value="240">4h</option><option value="1440">1d</option></select>
+    </label>
+    <label class="muted">Testnet Session <select id="liveExpSelect"></select></label>
+  </div>
+
+  <!-- Contextual header controls: Debate Mode -->
+  <div id="hdrDebate" style="display:none;align-items:center;gap:10px">
+    <span class="pill muted">MARKET ANALYSIS</span>
+  </div>
+
+  <!-- Kept for backward compatibility with scripts/tests -->
+  <select id="exp" style="display:none"></select>
 </header>
+
 <nav>
-  <button data-tab="training" class="on">Training</button>
-  <button data-tab="live">Live testnet</button>
-  <button data-tab="debate">Debate &amp; indicators</button>
+  <button data-tab="training" class="on">🏋️ Training</button>
+  <button data-tab="live">⚡ Live Trading</button>
+  <button data-tab="debate">📊 Debate &amp; indicators</button>
 </nav>
 
 <main>
-    <section class="card s12"><h2><span class="dot" id="llmDot"></span> LLM narration <span class="note" id="llmInfo"></span></h2><div class="scroll" id="narration"><div class="empty">—</div></div></section>
-  <!-- TRAINING -->
+  <section class="card s12"><h2><span class="dot" id="llmDot"></span> LLM narration <span class="note" id="llmInfo"></span></h2><div class="scroll" id="narration"><div class="empty">—</div></div></section>
+
+  <!-- CATEGORY 1: TRAINING -->
   <div class="tab grid on" id="tab-training">
-    <section class="card s12">
-      <h2><span class="dot" id="trDot"></span> Training progress <span class="note" id="trNote"></span></h2>
-      <div class="stats" id="trStats"><div class="empty">Select an experiment, or start one with <code>python -m app.cli run</code>.</div></div>
+    <!-- Current / Active Training -->
+    <section class="card s12" id="currentTrainSection">
+      <h2>
+        <span class="dot" id="trDot"></span>
+        <span id="trCurrentTitle">Current Training</span>
+        <span class="note" id="trNote"></span>
+        <span class="grow"></span>
+        <button id="btnFocusRunning" class="btn-sm" style="display:none" onclick="focusActiveTraining()">⚡ Return to Active Training</button>
+      </h2>
+      <div id="trBanner" style="display:none;margin-bottom:12px;padding:8px 12px;background:var(--panel2);border-radius:6px;border-left:3px solid var(--accent)"></div>
+      <div class="stats" id="trStats"><div class="empty">Select an experiment, or start one with <code>python -m app.cli train</code>.</div></div>
       <div style="margin-top:12px" class="bar"><i id="trBar" style="width:0"></i></div>
     </section>
+
     <section class="card s8">
       <h2>Fitness per generation
         <span class="legend"><span><b style="background:var(--up)"></b>best</span><span><b style="background:var(--accent)"></b>mean</span><span><b style="background:var(--warn)"></b>valid genes %</span></span></h2>
@@ -90,10 +135,48 @@
     <section class="card s6"><h2>Judge verdicts (out-of-sample)</h2><div class="scroll" id="verdicts"><div class="empty">—</div></div></section>
     <section class="card s12"><h2>Arena combat results</h2><div class="scroll" id="arenaResults"><div class="empty">Arena results appear here after the arena run completes.</div></div></section>
     <section class="card s12"><h2>Final ranking</h2><div class="scroll" id="ranking"><div class="empty">—</div></div></section>
+
+    <!-- Training History List (Excludes live testnet) -->
+    <section class="card s12" id="trainHistorySection">
+      <h2>
+        📜 Training History (历史训练列表)
+        <span class="note" id="trHistCount">Shows past training runs; click any to inspect</span>
+      </h2>
+      <div class="scroll" style="max-height:360px">
+        <table id="trainHistoryTable">
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Run Name</th>
+              <th>Experiment ID</th>
+              <th>Type</th>
+              <th>Started</th>
+              <th style="text-align:right">Action</th>
+            </tr>
+          </thead>
+          <tbody id="trainHistoryBody">
+            <tr><td colspan="6" class="empty">Loading training history…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
   </div>
 
-  <!-- LIVE -->
+  <!-- CATEGORY 2: LIVE TRADING & TESTNET -->
   <div class="tab grid" id="tab-live">
+    <!-- Active Chromosome Card -->
+    <section class="card s12" id="liveChromoSection">
+      <h2>
+        <span class="dot on" id="chromoDot"></span>
+        Active Chromosome in Live Trading (交易染色体与策略规则)
+        <span class="note" id="liveChromoNote">Genes driving live testnet signals</span>
+      </h2>
+      <div id="liveChromoContent">
+        <div class="empty">Loading chromosome parameters…</div>
+      </div>
+    </section>
+
+    <!-- Live Market & Testnet Execution -->
     <section class="card s12">
       <h2><span class="dot" id="liveDot"></span> Live market · Binance USDT-M <span class="note" id="liveAge"></span></h2>
       <div class="stats" id="liveStats"><div class="empty">Connecting…</div></div>
@@ -105,9 +188,10 @@
       <p class="note">Start: <code>python -m app.cli trade --experiment latest --dry-run</code> (no orders) or without <code>--dry-run</code> for testnet.</p>
     </section>
     <section class="card s12"><h2>Decisions &amp; orders</h2><div class="scroll" id="liveEvents"><div class="empty">—</div></div></section>
+    <section class="card s12"><h2>Debates behind recent forward-test decisions</h2><div class="scroll" id="pastDebates"><div class="empty">—</div></div></section>
   </div>
 
-  <!-- DEBATE -->
+  <!-- DEBATE & INDICATORS -->
   <div class="tab grid" id="tab-debate">
     <section class="card s12">
       <h2><span class="dot" id="anDot"></span> Rule-based bull vs bear · last closed candle <span class="note" id="anNote"></span></h2>
@@ -123,13 +207,12 @@
     </section>
     <section class="card s4"><h2>Analysts</h2><div id="analysts"><div class="empty">—</div></div></section>
     <section class="card s12"><h2>Evidence the agents may cite</h2><div class="ev" id="evidence"></div></section>
-    <section class="card s12"><h2>Debates behind recent forward-test decisions</h2><div class="scroll" id="pastDebates"><div class="empty">—</div></div></section>
   </div>
 </main>
 
 <script>
 const $ = id => document.getElementById(id);
-const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const esc = s => String(s ?? "").replace(/[&<>'"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const wsBase = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
 const fmt = (x, d = 2) => x == null || isNaN(x) ? "—" : Number(x).toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d});
 const pct = (x, d = 2) => x == null ? "—" : (x > 0 ? "+" : "") + (x * 100).toFixed(d) + "%";
@@ -138,16 +221,19 @@ const big = x => x >= 1e9 ? (x / 1e9).toFixed(2) + "B" : x >= 1e6 ? (x / 1e6).to
 const ago = ts => { const s = Math.max(0, Date.now() / 1000 - ts); return s < 60 ? s.toFixed(0) + "s ago" : s < 3600 ? (s / 60).toFixed(0) + "m ago" : (s / 3600).toFixed(1) + "h ago"; };
 const time = ts => new Date(ts * 1000).toLocaleString();
 const STATUS = {QUALIFIED:"up",RETAINED:"up",COMPLETED:"up",APPROVE:"up",RESIZE:"up",RETAIN:"up",long:"up",
-  REJECTED:"down",REJECT:"down",FAILED_RISK:"down",ABORTED_INTEGRITY:"down",short:"down",halted:"down",
+  RUNNING:"up",LIVE_TESTNET:"up",LIVE_DRY_RUN:"warn",
+  REJECTED:"down",REJECT:"down",FAILED_RISK:"down",ABORTED_INTEGRITY:"down",ABORTED:"down",FAILED:"down",short:"down",halted:"down",
   INSUFFICIENT_EVIDENCE:"warn",DEFER:"warn",no_trade:"warn"};
 const pill = s => `<span class="pill ${STATUS[s] || "muted"}">${esc(s)}</span>`;
 const stat = (k, v, c = "", sm = false) => `<div class="stat"><div class="k">${esc(k)}</div><div class="v ${sm ? "sm" : ""} ${c}">${v}</div></div>`;
 async function j(url) { const r = await fetch(url); if (!r.ok) throw new Error(r.status + " " + (await r.text()).slice(0, 200)); return r.json(); }
 const table = (head, rows) => rows.length ? `<table><thead><tr>${head.map(h => `<th class="${h[1] || ""}">${esc(h[0])}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>` : `<div class="empty">—</div>`;
 
-// ---------- canvas line chart: series = [{data:[y|null], color, axis:"l"|"r", dash}]
+// ---------- canvas line chart
 function lineChart(cv, series, opt = {}) {
+  if (!cv) return;
   const dpr = devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (!W || !H) return;
   cv.width = W * dpr; cv.height = H * dpr;
   const g = cv.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, W, H);
   const n = Math.max(0, ...series.map(s => s.data.length));
@@ -171,38 +257,225 @@ const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).
 
 // ---------- tabs
 let tab = location.hash.slice(1) || "training";
-function showTab(t) { tab = t; location.hash = t;
+function showTab(t) {
+  tab = t;
+  location.hash = t;
   document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
-  document.querySelectorAll(".tab").forEach(d => d.classList.toggle("on", d.id === "tab-" + t)); redraw(); }
+  document.querySelectorAll(".tab").forEach(d => d.classList.toggle("on", d.id === "tab-" + t));
+  
+  // Toggle header contextual controls
+  const ht = $("hdrTraining"), hl = $("hdrLive"), hd = $("hdrDebate");
+  if (ht) ht.style.display = (t === "training") ? "flex" : "none";
+  if (hl) hl.style.display = (t === "live") ? "flex" : "none";
+  if (hd) hd.style.display = (t === "debate") ? "flex" : "none";
+  
+  // Sync legacy select #exp
+  if ($("exp")) $("exp").value = (t === "live" ? liveEid : trainEid) || "";
+  
+  redraw();
+}
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
 
-// ---------- experiments
-let eid = null;
-async function loadExperiments() {
-  try { const xs = await j("/api/experiments"); const sel = $("exp"), cur = sel.value;
-    sel.innerHTML = xs.length ? xs.map(e => `<option value="${esc(e.id)}">${esc(e.name || e.id)} · ${esc(e.state)} · ${new Date(e.created * 1000).toLocaleString()}</option>`).join("") : `<option value="">(none yet)</option>`;
-    const activeArena = xs.find(e => e.state === "RUNNING" && (e.name || "").startsWith("arena:"));
-    if (activeArena) sel.value = activeArena.id;
-    else if (cur && xs.some(e => e.id === cur)) sel.value = cur;
-    const nxt = sel.value || null; if (nxt !== eid) { eid = nxt; refreshExperiment(); }
-  } catch (e) { $("exp").innerHTML = `<option>API error</option>`; }
-}
-$("exp").onchange = () => { eid = $("exp").value || null; refreshExperiment(); };
+// ---------- experiments separation & management
+let allExperiments = [];
+let trainEid = null;
+let liveEid = null;
+let activeRunningTrainEid = null;
 
-// ---------- training
+function isLiveExperiment(e) {
+  const name = e.name || "", state = e.state || "", id = e.id || "";
+  return (e.category === "live") || name.startsWith("testnet:") || state === "LIVE_TESTNET" || state === "LIVE_DRY_RUN" || id.startsWith("live_");
+}
+function isTrainingExperiment(e) {
+  return !isLiveExperiment(e);
+}
+
+async function loadExperiments() {
+  try {
+    const xs = await j("/api/experiments");
+    allExperiments = xs;
+
+    const trainList = xs.filter(isTrainingExperiment);
+    const liveList = xs.filter(isLiveExperiment);
+
+    // Active running training detection
+    const runningTrain = trainList.find(e => e.state === "RUNNING");
+    activeRunningTrainEid = runningTrain ? runningTrain.id : null;
+
+    // Header badge
+    const trBadge = $("trStatusBadge");
+    if (trBadge) {
+      if (activeRunningTrainEid) {
+        trBadge.className = "pill up";
+        trBadge.textContent = "⚡ TRAINING RUNNING";
+      } else {
+        trBadge.className = "pill muted";
+        trBadge.textContent = "TRAINING IDLE";
+      }
+    }
+
+    // Default trainEid selection
+    if (!trainEid || !trainList.some(e => e.id === trainEid)) {
+      trainEid = activeRunningTrainEid || (trainList[0]?.id || null);
+    }
+
+    // Default liveEid selection
+    const activeLive = liveList.find(e => e.state === "LIVE_TESTNET" || e.state === "LIVE_DRY_RUN");
+    if (!liveEid || !liveList.some(e => e.id === liveEid)) {
+      liveEid = activeLive ? activeLive.id : (liveList[0]?.id || null);
+    }
+
+    // Update Training select dropdown
+    const trSel = $("trainExpSelect");
+    if (trSel) {
+      trSel.innerHTML = trainList.length ? trainList.map(e =>
+        `<option value="${esc(e.id)}"${e.id === trainEid ? " selected" : ""}>${esc(e.name || e.id)} · ${esc(e.state)} · ${time(e.created)}</option>`
+      ).join("") : `<option value="">(no training runs yet)</option>`;
+      if (trainEid) trSel.value = trainEid;
+    }
+
+    // Update Live select dropdown
+    const lvSel = $("liveExpSelect");
+    if (lvSel) {
+      lvSel.innerHTML = liveList.length ? liveList.map(e =>
+        `<option value="${esc(e.id)}"${e.id === liveEid ? " selected" : ""}>${esc(e.name || e.id)} · ${esc(e.state)} · ${time(e.created)}</option>`
+      ).join("") : `<option value="">(no live sessions yet)</option>`;
+      if (liveEid) lvSel.value = liveEid;
+    }
+
+    // Sync legacy select #exp
+    const expSel = $("exp");
+    if (expSel) {
+      expSel.innerHTML = xs.map(e => `<option value="${esc(e.id)}">${esc(e.name || e.id)}</option>`).join("");
+      expSel.value = (tab === "live" ? liveEid : trainEid) || "";
+    }
+
+    // Render Training History Table
+    renderTrainingHistory(trainList);
+
+    // Refresh views
+    refreshTraining();
+    refreshLive();
+  } catch (e) {
+    if ($("trainExpSelect")) $("trainExpSelect").innerHTML = `<option>API error</option>`;
+    if ($("liveExpSelect")) $("liveExpSelect").innerHTML = `<option>API error</option>`;
+  }
+}
+
+if ($("trainExpSelect")) {
+  $("trainExpSelect").onchange = () => {
+    trainEid = $("trainExpSelect").value || null;
+    refreshTraining();
+  };
+}
+
+if ($("liveExpSelect")) {
+  $("liveExpSelect").onchange = () => {
+    liveEid = $("liveExpSelect").value || null;
+    refreshLive();
+  };
+}
+
+// Legacy compatibility handler
+if ($("exp")) {
+  $("exp").onchange = () => {
+    const val = $("exp").value;
+    const expObj = allExperiments.find(e => e.id === val);
+    if (expObj && isLiveExperiment(expObj)) {
+      liveEid = val;
+      showTab("live");
+      refreshLive();
+    } else {
+      trainEid = val;
+      showTab("training");
+      refreshTraining();
+    }
+  };
+}
+
+function selectTraining(id) {
+  trainEid = id;
+  if ($("trainExpSelect")) $("trainExpSelect").value = id;
+  refreshTraining();
+  renderTrainingHistory(allExperiments.filter(isTrainingExperiment));
+  const el = $("currentTrainSection");
+  if (el) window.scrollTo({top: el.offsetTop - 70, behavior: "smooth"});
+}
+
+function focusActiveTraining() {
+  if (activeRunningTrainEid) {
+    selectTraining(activeRunningTrainEid);
+  }
+}
+
+function renderTrainingHistory(trainList) {
+  if ($("trHistCount")) $("trHistCount").textContent = `${trainList.length} total training runs`;
+  const body = $("trainHistoryBody");
+  if (!body) return;
+  if (!trainList.length) {
+    body.innerHTML = `<tr><td colspan="6" class="empty">No training runs found. Run <code>python -m app.cli train</code>.</td></tr>`;
+    return;
+  }
+  body.innerHTML = trainList.map(e => {
+    const isCur = e.id === trainEid;
+    const typeLabel = (e.name || "").startsWith("arena:") ? "Arena Combat" : "WFA Pipeline";
+    return `<tr class="${isCur ? "row-active" : ""}" onclick="selectTraining('${esc(e.id)}')" style="cursor:pointer">
+      <td>${pill(e.state)}</td>
+      <td><b>${esc(e.name || e.id)}</b></td>
+      <td class="mono muted">${esc(e.id)}</td>
+      <td><span class="pill muted">${typeLabel}</span></td>
+      <td class="muted">${time(e.created)} <small>(${ago(e.created)})</small></td>
+      <td style="text-align:right">
+        <button class="btn-sm ${isCur ? "active" : ""}" onclick="event.stopPropagation();selectTraining('${esc(e.id)}')">${isCur ? "Viewing" : "Inspect"}</button>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+// ---------- training view logic
 let train = null;
 async function refreshTraining() {
-  if (!eid) return;
-  try { train = await j(`/api/experiments/${encodeURIComponent(eid)}/training`); $("trDot").className = "dot on"; }
-  catch (e) { $("trDot").className = "dot err"; $("trNote").textContent = e.message; return; }
+  if (!trainEid) {
+    $("trStats").innerHTML = `<div class="empty">No training experiment selected. Run <code>python -m app.cli train</code>.</div>`;
+    return;
+  }
+  try {
+    train = await j(`/api/experiments/${encodeURIComponent(trainEid)}/training`);
+    $("trDot").className = "dot on";
+  } catch (e) {
+    $("trDot").className = "dot err";
+    $("trNote").textContent = e.message;
+    return;
+  }
+
   const g = train.generations, last = g[g.length - 1], st = train.state;
   const running = !/COMPLETED|ABORTED|FAILED/.test(st);
+  const isViewingRunning = trainEid === activeRunningTrainEid;
+
+  // Title & Active run button
+  if ($("trCurrentTitle")) $("trCurrentTitle").textContent = isViewingRunning ? "Active Training in Progress" : `Training Run: ${train.id}`;
+  if ($("btnFocusRunning")) $("btnFocusRunning").style.display = (!isViewingRunning && activeRunningTrainEid) ? "inline-block" : "none";
+  
+  const banner = $("trBanner");
+  if (banner) {
+    if (isViewingRunning) {
+      banner.style.display = "block";
+      banner.innerHTML = `<span class="dot pulse" style="margin-right:6px"></span> <b>Live Training in Progress:</b> <span class="mono">${esc(train.id)}</span> · generations updating in real time`;
+    } else if (activeRunningTrainEid) {
+      banner.style.display = "block";
+      banner.innerHTML = `📜 <b>Viewing Historical Training:</b> <span class="mono">${esc(train.id)}</span> <span class="note">(Active training <code>${esc(activeRunningTrainEid)}</code> is running in background)</span>`;
+    } else {
+      banner.style.display = "none";
+    }
+  }
+
   const per = last?.generations || train.plan.generations || 0, folds = last?.folds || 1;
   const rounds = train.plan.max_rounds || 1;
   const done = g.length, total = per * folds * rounds;
   $("trBar").style.width = !running ? "100%" : total ? Math.min(100, done / total * 100).toFixed(1) + "%" : "0";
   $("trNote").textContent = running ? "live · refreshes every 2s" : "finished";
   const best = g.length ? Math.max(...g.map(x => x.best)) : null;
+
   $("trStats").innerHTML = [
     stat("State", pill(st), "", true),
     stat(train.plan.mode === "arena" ? "Round / Fold" : "Fold", last ? `${last.round || 1} / ${rounds} · ${last.fold + 1} / ${folds}` : "—", "", true),
@@ -215,12 +488,16 @@ async function refreshTraining() {
     stat("Failed risk", last ? last.failed_risk : "—", last?.failed_risk ? "down" : ""),
     stat("Sec / gen", fmt(last?.seconds, 2), "", true),
   ].join("");
+
   $("stages").innerHTML = table([["Stage"], ["Fold", "num"], ["When"]], train.states.slice().reverse().map(s =>
     `<tr><td>${pill(s.to)}${s.reason ? ` <span class="muted">${esc(s.reason)}</span>` : ""}</td><td class="num">${s.fold != null ? s.fold + 1 : ""}</td><td class="muted">${ago(s.ts)}</td></tr>`));
+
   $("gens").innerHTML = table([["Round", "num"], ["Fold", "num"], ["Gen", "num"], ["Best", "num"], ["Mean", "num"], ["Valid", "num"], ["Failed", "num"], ["Best gene"]],
     g.slice().reverse().map(x => `<tr><td class="num">${x.round || 1}</td><td class="num">${x.fold + 1}</td><td class="num">${x.gen + 1}</td><td class="num ${cls(x.best)}">${fmt(x.best, 4)}</td><td class="num ${cls(x.mean)}">${fmt(x.mean, 4)}</td><td class="num">${x.valid ?? "—"}/${x.population ?? "—"}</td><td class="num">${x.failed_risk}</td><td class="mono muted">${esc(x.best_id)}</td></tr>`));
+
   $("verdicts").innerHTML = table([["Fold", "num"], ["Gene"], ["Judge"], ["Status"], ["Why"]],
     train.verdicts.slice().reverse().map(v => `<tr><td class="num">${v.fold + 1}</td><td class="mono">${esc(v.id)}</td><td>${pill(v.verdict)}</td><td>${pill(v.status)}</td><td class="wrap muted">${esc((v.flags || []).join(", ") || v.rationale || "")}</td></tr>`));
+
   const ar = train.arena_result;
   if (ar) {
     const combatants = (ar.combatants || []).slice().sort((a, b) => Number(b.qualified) - Number(a.qualified) || b.oos_pnl - a.oos_pnl);
@@ -229,9 +506,11 @@ async function refreshTraining() {
   } else {
     $("arenaResults").innerHTML = `<div class="empty">${train.plan.mode === "arena" ? (running ? "Arena is training; candidate results will appear after combat." : "Arena result was not saved.") : "This experiment is not an arena training run."}</div>`;
   }
+
   drawTraining();
   refreshFinal();
 }
+
 function drawTraining() {
   if (!train || tab !== "training") return;
   const g = train.generations, marks = [];
@@ -242,13 +521,15 @@ function drawTraining() {
     {data: g.map(x => x.population ? x.valid / x.population * 100 : null), color: css("--warn"), axis: "r", dash: [4, 3]},
   ], {marks, dec: 3, rmin: 0, rmax: 100, empty: "no generations yet — training starts after data validation and feature build"});
 }
+
 async function refreshFinal() {
-  if (!eid) return;
-  try { const f = await j(`/api/experiments/${encodeURIComponent(eid)}/final`);
+  if (!trainEid) return;
+  try {
+    const f = await j(`/api/experiments/${encodeURIComponent(trainEid)}/final`);
     const rows = f.final?.rows || f.final?.ranking || f.final || [];
     $("ranking").innerHTML = Array.isArray(rows) && rows.length ? table([["#"], ["Gene"], ["Status"], ["Fold", "num"], ["Windows", "num"], ["Consistency", "num"], ["Adj. net", "num"], ["Holdout net", "num"]],
       rows.map((r, i) => `<tr><td>${i + 1}</td><td class="mono">${esc(r.id)}</td><td>${pill(r.status)}</td><td class="num">${r.fold != null ? r.fold + 1 : ""}</td><td class="num">${r.windows ?? ""}</td><td class="num">${fmt(r.consistency * 100, 0)}%</td><td class="num ${cls(r.rank_net)}">${fmt(r.rank_net)}</td><td class="num ${cls(r.holdout?.net_pnl)}">${fmt(r.holdout?.net_pnl)}</td></tr>`))
-      : `<div class="empty">${train?.plan?.mode === "arena" ? "Arena combat results are shown above; this experiment has no standard WFA ranking." : "No ranking yet (it is written when training reaches the final stage)."}</div>`;
+      : `<div class="empty">${train?.plan?.mode === "arena" ? "Arena combat results are shown above; this experiment has no standard WFA ranking." : "No ranking yet (written when training reaches the final stage)."}</div>`;
     const narr = f.narration || [];
     const latest = narr.flatMap(n => n.narration || n.items || [n]).at(-1);
     const label = latest?.error ? "LLM call failed" : latest?.provider?.startsWith("offline") ? "Offline template (not LLM)" : latest?.valid === false ? "Reply has unsupported citations" : latest?.text ? "LLM reply saved" : "No LLM call saved";
@@ -257,11 +538,10 @@ async function refreshFinal() {
     $("narration").innerHTML = narr.length ? narr.slice().reverse().flatMap(n => (n.narration || n.items || [n]).slice().reverse().map(x =>
       `<div class="narr ${x.valid === false || x.error ? "bad" : ""}"><div class="muted mono">${esc(n.id || n.scope || "")} ${esc(x.decision_id || "")} · ${esc(n.provider || x.provider || "")}</div>${esc(x.text || x.narration || x.reason || x.error || JSON.stringify(x).slice(0, 400))}</div>`)).join("")
       : `<div class="empty">No narration saved yet. Run <code>python -m app.cli explain --experiment latest</code>.</div>`;
-    if (eid) $("narration").innerHTML += `<div class="muted">Refresh saved explanations: <code>${esc('python -m app.cli explain --experiment "' + eid + '"')}</code></div>`;
   } catch (e) { $("ranking").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 
-// ---------- live testnet
+// ---------- live trading view & chromosome rendering
 let live = null, liveWs = null;
 function connectLive() {
   if (liveWs) liveWs.close();
@@ -279,35 +559,155 @@ function renderLive() {
   if (tab === "live") { const c = d.candles; $("chartNote").textContent = `${c.length} candles · last one forming`;
     lineChart($("chart"), [{data: c.map(x => x[4]), color: css("--accent"), width: 2}, {data: c.map(x => x[2]), color: css("--dim"), width: 1}, {data: c.map(x => x[3]), color: css("--dim"), width: 1}]); }
 }
+
 let liveEv = [];
+async function refreshLive() {
+  if (!liveEid) {
+    $("ftStats").innerHTML = `<div class="empty">No live testnet session selected. Run <code>python -m app.cli trade --experiment latest --dry-run</code>.</div>`;
+    $("liveChromoContent").innerHTML = `<div class="empty">No live testnet session active.</div>`;
+    return;
+  }
+  await Promise.all([refreshLiveEvents(), refreshLiveChromosome()]);
+}
+
+async function refreshLiveChromosome() {
+  if (!liveEid) return;
+  try {
+    const expData = await j(`/api/experiments/${encodeURIComponent(liveEid)}`);
+    const cfg = expData.config || {};
+    let chromo = cfg.chromosome;
+    
+    // Fallback: check /chromosomes endpoint if not in config directly
+    if (!chromo) {
+      const chList = await j(`/api/experiments/${encodeURIComponent(liveEid)}/chromosomes`);
+      if (chList && chList.length) chromo = chList[0].body || chList[0];
+    }
+    
+    // Second fallback: check live_started event
+    const startEv = liveEv.find(e => e.type === "live_started");
+    const chromoId = chromo?.id || startEv?.payload?.chromosome || expData.chromosome_id || "—";
+
+    if (!chromo || !chromo.genes) {
+      $("liveChromoContent").innerHTML = `
+        <div style="padding:12px;background:var(--panel2);border-radius:8px">
+          <p><b class="up mono">Chromosome: ${esc(chromoId)}</b> · Session: <span class="mono">${esc(liveEid)}</span></p>
+          <p class="muted">Detailed gene parameters not embedded in session metadata. Start live trader with current repo version to display complete gene breakdown.</p>
+        </div>`;
+      return;
+    }
+
+    const g = chromo.genes;
+    const trend = g.trend || {};
+    const stop = g.stop_target || {};
+    const topo = g.topology || {};
+    const sizing = g.sizing || {};
+    const cost = g.cost || {};
+    const amt = g.amt || {};
+    const smc = g.smc || {};
+    const disc = g.discussion || {};
+
+    $("liveChromoContent").innerHTML = `
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+        <span class="pill up mono" style="font-size:14px;padding:3px 12px">🧬 ${esc(chromo.id)}</span>
+        <span class="pill muted">Gen ${esc(chromo.generation ?? 0)}</span>
+        <span class="pill ${expData.state === 'LIVE_TESTNET' ? 'up' : 'warn'}">${esc(expData.state || 'TESTNET')}</span>
+        <span class="muted mono">source: ${esc(startEv?.payload?.source_experiment || 'arena')}</span>
+        <span class="muted note">Operator: ${esc(chromo.operator || 'elite')}</span>
+      </div>
+      <div class="chromo-grid">
+        <div class="chromo-block">
+          <h3>📈 Trend &amp; Guard</h3>
+          <div class="chromo-row"><span class="k">EMA Fast</span><span class="v">${trend.ema_fast ?? '—'}</span></div>
+          <div class="chromo-row"><span class="k">EMA Slow</span><span class="v">${trend.ema_slow ?? '—'}</span></div>
+          <div class="chromo-row"><span class="k">RSI Guard</span><span class="v">${trend.rsi_guard != null ? fmt(trend.rsi_guard, 1) : '—'}</span></div>
+        </div>
+        <div class="chromo-block">
+          <h3>🎯 Stop &amp; Target</h3>
+          <div class="chromo-row"><span class="k">Stop Method</span><span class="v">${esc(stop.stop_method ?? 'atr')} (${fmt(stop.stop_atr, 2)}x)</span></div>
+          <div class="chromo-row"><span class="k">Target RR</span><span class="v">${fmt(stop.rr, 2)}x RR</span></div>
+          <div class="chromo-row"><span class="k">Max Hold</span><span class="v">${stop.max_hold_bars ?? '—'} bars</span></div>
+        </div>
+        <div class="chromo-block">
+          <h3>🧩 Entry &amp; Topology</h3>
+          <div class="chromo-row"><span class="k">Mode</span><span class="v">${esc(topo.entry_mode ?? '—')}</span></div>
+          <div class="chromo-row"><span class="k">Compose</span><span class="v">${esc(topo.compose ?? 'all')}</span></div>
+          <div class="chromo-row"><span class="k">Value Area</span><span class="v">${esc(amt.va_policy ?? (amt.use_value_area ? 'yes' : 'no'))}</span></div>
+          <div class="chromo-row"><span class="k">SMC FVG/Sweep</span><span class="v">${smc.use_fvg ? '✓ FVG' : ''} ${smc.respect_sweep ? '✓ Sweep' : ''}</span></div>
+        </div>
+        <div class="chromo-block">
+          <h3>🛡️ Risk &amp; Debate</h3>
+          <div class="chromo-row"><span class="k">Risk / Trade</span><span class="v">${pct(sizing.risk_frac, 2)}</span></div>
+          <div class="chromo-row"><span class="k">Max Cost/Reward</span><span class="v">${pct(cost.max_cost_to_reward, 1)}</span></div>
+          <div class="chromo-row"><span class="k">Debate Threshold</span><span class="v">${fmt(disc.agreement_threshold, 2)} (${esc(disc.mapping ?? 'lenient')})</span></div>
+        </div>
+      </div>
+    `;
+  } catch (e) {
+    $("liveChromoContent").innerHTML = `<div class="empty">Failed to load chromosome: ${esc(e.message)}</div>`;
+  }
+}
+
 async function refreshLiveEvents() {
-  if (!eid) return;
-  try { liveEv = await j(`/api/experiments/${encodeURIComponent(eid)}/live`); } catch { return; }
+  if (!liveEid) return;
+  try {
+    liveEv = await j(`/api/experiments/${encodeURIComponent(liveEid)}/live`);
+  } catch { return; }
+
   const dec = liveEv.filter(e => e.type === "decision"), started = liveEv.filter(e => e.type === "live_started").pop();
   const lastD = dec[dec.length - 1], orders = liveEv.filter(e => e.type === "order");
   const halted = liveEv.filter(e => e.type === "halted").pop();
-  $("ftStats").innerHTML = liveEv.length ? [stat("Mode", esc(started?.payload.mode || "—"), started?.payload.mode === "DRY_RUN" ? "warn" : "up", true),
-    stat("Decisions", dec.length), stat("Orders", orders.length), stat("Last decision", lastD ? ago(lastD.ts) : "—", "", true),
-    stat("Equity", fmt(lastD?.payload.equity)), stat("Status", halted ? pill("halted") : pill("running"), "", true)].join("") : `<div class="empty">No live/dry-run activity for this experiment yet.</div>`;
-  $("liveEvents").innerHTML = table([["When"], ["Event"], ["Side"], ["Risk"], ["Qty", "num"], ["Detail"]], liveEv.slice().reverse().map(e => { const p = e.payload;
+  const positionEvents = liveEv.filter(e => ["position", "position_reconnected", "position_closed", "account_sync"].includes(e.type));
+  const latestPosition = positionEvents[positionEvents.length - 1];
+  const pp = latestPosition?.payload || {};
+  const hasPosition = ["position", "position_reconnected"].includes(latestPosition?.type) && Number(pp.qty || 0) !== 0;
+  const positionLabel = hasPosition ? `${pp.side || (Number(pp.qty) > 0 ? "LONG" : "SHORT")} ${fmt(Math.abs(Number(pp.qty)), 4)}` : (latestPosition ? "FLAT" : "—");
+  const equity = pp.equity ?? lastD?.payload.equity;
+
+  $("ftStats").innerHTML = liveEv.length ? [
+    stat("Mode", esc(started?.payload.mode || "—"), started?.payload.mode === "DRY_RUN" ? "warn" : "up", true),
+    stat("Position", esc(positionLabel), hasPosition ? "warn" : "", true),
+    stat("Decisions", dec.length),
+    stat("Orders", orders.length),
+    stat("Last decision", lastD ? ago(lastD.ts) : "—", "", true),
+    stat("Equity", fmt(equity)),
+    stat("Status", halted ? pill("halted") : pill("running"), "", true)
+  ].join("") : `<div class="empty">No live/dry-run activity for session <code>${esc(liveEid)}</code> yet.</div>`;
+
+  $("liveEvents").innerHTML = table([["When"], ["Event"], ["Side"], ["Risk"], ["Qty", "num"], ["Detail"]], liveEv.slice().reverse().map(e => {
+    const p = e.payload;
     const side = p.proposal?.side, risk = p.risk?.outcome, qty = p.entry?.qty ?? p.risk?.approved_qty ?? p.qty;
     const det = p.blocked || p.reason || (p.dry_run_order ? "dry-run: order not sent" : "") || (p.risk?.reasons || []).join(", ") || p.error || "";
-    return `<tr><td class="muted">${time(e.ts)}</td><td>${pill(e.type)}</td><td>${side ? pill(side) : ""}</td><td>${risk ? pill(risk) : ""}</td><td class="num">${qty != null ? fmt(qty, 4) : ""}</td><td class="wrap muted">${esc(det)}</td></tr>`; }));
+    return `<tr><td class="muted">${time(e.ts)}</td><td>${pill(e.type)}</td><td>${side ? pill(side) : ""}</td><td>${risk ? pill(risk) : ""}</td><td class="num">${qty != null ? fmt(qty, 4) : ""}</td><td class="wrap muted">${esc(det)}</td></tr>`;
+  }));
+
   renderPastDebates();
 }
-async function refreshLlm() { try { const s = await j("/api/llm");
-  $("llmDot").className = "dot " + ("");
-  $("llmInfo").textContent = [s.configured ? "config ready (not proof of a successful call)" : "not configured", s.base_url, s.model, s.missing?.length ? "missing " + s.missing.join(", ") : ""].filter(Boolean).join(" · "); } catch {} }
+
+async function refreshLlm() {
+  try {
+    const s = await j("/api/llm");
+    $("llmDot").className = "dot";
+    $("llmInfo").textContent = [s.configured ? "config ready (not proof of a successful call)" : "not configured", s.base_url, s.model, s.missing?.length ? "missing " + s.missing.join(", ") : ""].filter(Boolean).join(" · ");
+  } catch {}
+}
 
 // ---------- debate & indicators
 let an = null;
 async function refreshAnalysis() {
-  try { an = await j(`/api/analysis/${$("sym").value}?tf=${$("tf").value}&limit=300`); $("anDot").className = "dot on"; }
-  catch (e) { $("anDot").className = "dot err"; $("anNote").textContent = e.message; return; }
+  try {
+    an = await j(`/api/analysis/${$("sym").value}?tf=${$("tf").value}&limit=300`);
+    $("anDot").className = "dot on";
+  } catch (e) {
+    $("anDot").className = "dot err";
+    $("anNote").textContent = e.message;
+    return;
+  }
   $("anNote").textContent = an.bar_ts ? `${an.symbol} · candle ${time(an.bar_ts)} · refreshes every 15s` : "";
   const d = an.debate;
-  if (!d) { $("verdict").innerHTML = `<div class="empty">Not enough evidence: ${esc((an.warnings || []).join(", "))}</div>`; $("bull").innerHTML = $("bear").innerHTML = ""; }
-  else {
+  if (!d) {
+    $("verdict").innerHTML = `<div class="empty">Not enough evidence: ${esc((an.warnings || []).join(", "))}</div>`;
+    $("bull").innerHTML = $("bear").innerHTML = "";
+  } else {
     const pos = (d.score + 1) / 2 * 100;
     $("verdict").innerHTML = `<div class="stats">${stat("Recommendation", pill(d.recommendation), "", true)}${stat("Debate score", fmt(d.score, 3), cls(d.score))}
       ${stat("Price", fmt(an.evidence.price?.close))}${stat("Trend", esc(an.evidence.regime?.trend), "", true)}</div>
@@ -323,28 +723,42 @@ async function refreshAnalysis() {
   $("evidence").innerHTML = Object.entries(an.evidence || {}).map(([k, v]) => `<div><b>${esc(k)}</b>${esc(Object.entries(v || {}).map(([a, b]) => `${a}: ${typeof b === "object" && b ? JSON.stringify(b) : b}`).join("\n"))}</div>`).join("").replace(/\n/g, "<br>");
   drawIndicators();
 }
+
 function drawIndicators() {
-  if (!an || tab !== "debate") return; const s = an.series, c = an.candles;
+  if (!an || tab !== "debate") return;
+  const s = an.series, c = an.candles;
   lineChart($("emaChart"), [{data: c.map(x => x[4]), color: css("--text"), width: 1.4}, {data: s.ema20, color: css("--accent")}, {data: s.ema50, color: css("--violet")}]);
   lineChart($("rsiChart"), [{data: s.rsi14, color: css("--warn")}], {lmin: 0, lmax: 100, bands: [30, 70], dec: 0});
   lineChart($("atrChart"), [{data: s.atr14, color: css("--down")}]);
 }
+
 function renderPastDebates() {
   const dec = liveEv.filter(e => e.type === "decision" && e.payload.discussion).slice(-30).reverse();
-  $("pastDebates").innerHTML = table([["When"], ["Debate"], ["Score", "num"], ["Trader"], ["Risk gate"], ["Strongest bull"], ["Strongest bear"]], dec.map(e => { const d = e.payload.discussion;
+  $("pastDebates").innerHTML = table([["When"], ["Debate"], ["Score", "num"], ["Trader"], ["Risk gate"], ["Strongest bull"], ["Strongest bear"]], dec.map(e => {
+    const d = e.payload.discussion;
     const top = r => { const t = d.turns.find(x => x.role === r); const c = (t?.claims || []).slice().sort((a, b) => b.weight - a.weight)[0]; return c ? esc(c.text) : "—"; };
-    return `<tr><td class="muted">${time(e.ts)}</td><td>${pill(d.recommendation)}</td><td class="num ${cls(d.score)}">${fmt(d.score, 3)}</td><td>${pill(e.payload.proposal?.side || "—")}</td><td>${pill(e.payload.risk?.outcome || "—")}</td><td class="wrap">${top("bull")}</td><td class="wrap">${top("bear")}</td></tr>`; }));
+    return `<tr><td class="muted">${time(e.ts)}</td><td>${pill(d.recommendation)}</td><td class="num ${cls(d.score)}">${fmt(d.score, 3)}</td><td>${pill(e.payload.proposal?.side || "—")}</td><td>${pill(e.payload.risk?.outcome || "—")}</td><td class="wrap">${top("bull")}</td><td class="wrap">${top("bear")}</td></tr>`;
+  }));
 }
 
-function refreshExperiment() { train = null; liveEv = []; refreshTraining(); refreshFinal(); refreshLiveEvents(); }
-function redraw() { drawTraining(); renderLive(); drawIndicators(); }
+function redraw() {
+  drawTraining();
+  renderLive();
+  drawIndicators();
+}
+
 $("sym").onchange = $("tf").onchange = () => { connectLive(); refreshAnalysis(); };
 addEventListener("resize", redraw);
 
-showTab(tab); loadExperiments(); connectLive(); refreshAnalysis(); refreshLlm();
-setInterval(loadExperiments, 5000);
+showTab(tab);
+loadExperiments();
+connectLive();
+refreshAnalysis();
+refreshLlm();
+
+setInterval(loadExperiments, 4000);
 setInterval(refreshTraining, 2000);
-setInterval(refreshLiveEvents, 3000);
+setInterval(refreshLive, 3000);
 setInterval(refreshAnalysis, 15000);
 setInterval(refreshLlm, 30000);
 </script>

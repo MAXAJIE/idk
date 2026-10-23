@@ -44,6 +44,12 @@ def resolve_experiment(store: Store, requested: str) -> str:
         if eligible:
             return eligible[0]["id"]
         raise SystemExit("No completed research experiment. Run: python -m app.cli run; then experiments.")
+    if requested in ("best", "auto"):
+        try:
+            _, best_eid, _ = find_best_chromosome(store)
+            return best_eid
+        except SystemExit:
+            raise SystemExit("No completed qualified training chromosome found. Run: python -m app.cli train --config configs/binance.json --auto.")
     if any(e["id"] == requested for e in experiments):
         return requested
     raise SystemExit(f"Unknown experiment '{requested}'. IDs are exact, not sequence numbers like 0001. "
@@ -52,14 +58,31 @@ def resolve_experiment(store: Store, requested: str) -> str:
 
 def pick_chromosome(store: Store, eid: str, allow_unqualified: bool = False) -> Chromosome:
     fin = store.artifact(eid, "final", "ranking")
-    if not fin:
+    arena_res = store.artifact(eid, "arena", "result")
+
+    if not fin and not arena_res:
         exp = next((e for e in store.experiments() if e["id"] == eid), None)
         state = exp["state"] if exp else "NOT_FOUND"
         states = [e["payload"] for e in store.events(eid, limit=100000) if e["type"] == "state"]
         reason = states[-1].get("reason", "experiment has not completed") if states else "experiment not found"
         raise SystemExit(f"experiment {eid} has no final ranking: state={state}; {reason}. "
                          "Run python -m app.cli experiments, then run a new experiment if aborted.")
-    rows = [r for r in fin["ranking"] if r["status"] == "QUALIFIED"] or (fin["ranking"] if allow_unqualified else [])
+
+    # If arena experiment result exists
+    if arena_res and isinstance(arena_res, dict):
+        champ = arena_res.get("champion")
+        if champ and isinstance(champ, dict) and "genes" in champ:
+            return Chromosome(genes=champ["genes"], generation=champ.get("generation", 0),
+                              parents=champ.get("parents", []), operator=champ.get("operator", "elite"))
+        for comb in (arena_res.get("combatants") or []):
+            if isinstance(comb, dict) and comb.get("chromosome"):
+                if comb.get("qualified") or allow_unqualified:
+                    cd = comb["chromosome"]
+                    if isinstance(cd, dict) and "genes" in cd:
+                        return Chromosome(genes=cd["genes"], generation=cd.get("generation", 0),
+                                          parents=cd.get("parents", []), operator=cd.get("operator", "elite"))
+
+    rows = [r for r in fin["ranking"] if r["status"] == "QUALIFIED"] or (fin["ranking"] if allow_unqualified else []) if fin else []
     if not rows and allow_unqualified:
         candidates = [c for c in store.artifacts(eid, "candidate") if c["status"] != "FAILED_RISK"]
         candidates.sort(key=lambda c: -c["oos"]["scorecard"]["net_pnl"])
@@ -69,6 +92,107 @@ def pick_chromosome(store: Store, eid: str, allow_unqualified: bool = False) -> 
                          "research preview only: trade --dry-run --once --allow-unqualified --experiment <id>.")
     d = rows[0]["chromosome"]
     return Chromosome(genes=d["genes"], generation=d["generation"], parents=d["parents"], operator=d["operator"])
+
+
+def find_best_chromosome(store: Store, requested: str | None = None, allow_unqualified: bool = False) -> tuple[Chromosome, str, dict]:
+    """Automatically find and return (Chromosome, source_eid, metadata) of the best qualified strategy.
+
+    Scans completed Arena experiments and WFA research experiments, ranking them by
+    anti-overfitting validation score (OOS PnL weighted by consistency).
+    """
+    experiments = store.experiments()
+    if not experiments:
+        raise SystemExit("No experiments in database. Run python -m app.cli train --config configs/binance.json --auto first.")
+
+    if requested and requested not in ("best", "latest", "auto"):
+        c = pick_chromosome(store, requested, allow_unqualified)
+        return c, requested, {"type": "explicit_experiment", "source": requested}
+
+    candidates = []
+    completed = [e for e in experiments if e.get("state") in ("COMPLETED", "LIVE_TESTNET", "LIVE_DRY_RUN")]
+    search_pool = completed if completed else experiments
+
+    for exp in search_pool:
+        eid = exp["id"]
+        created = exp.get("created") or 0
+
+        # 1. Check arena result
+        arena_res = store.artifact(eid, "arena", "result")
+        if arena_res and isinstance(arena_res, dict):
+            champ = arena_res.get("champion")
+            if champ and isinstance(champ, dict) and "genes" in champ:
+                oos_pnl = float(arena_res.get("champion_oos_pnl") or 0.0)
+                cons = float(arena_res.get("champion_consistency") or 0.0)
+                score = oos_pnl * (0.5 + 0.5 * cons)
+                ch = Chromosome(genes=champ["genes"], generation=champ.get("generation", 0),
+                                parents=champ.get("parents", []), operator=champ.get("operator", "elite"))
+                candidates.append({
+                    "chromosome": ch, "source_eid": eid, "qualified": True,
+                    "score": score, "created": created,
+                    "meta": {"type": "arena_champion", "oos_pnl": oos_pnl, "consistency": cons, "source": eid}
+                })
+            for comb in (arena_res.get("combatants") or []):
+                if isinstance(comb, dict) and comb.get("chromosome"):
+                    cd = comb["chromosome"]
+                    if isinstance(cd, dict) and "genes" in cd:
+                        is_qual = bool(comb.get("qualified"))
+                        oos_pnl = float(comb.get("oos_pnl") or 0.0)
+                        cons = float(comb.get("consistency") or 0.0)
+                        score = oos_pnl * (0.5 + 0.5 * cons)
+                        if is_qual or allow_unqualified:
+                            ch = Chromosome(genes=cd["genes"], generation=cd.get("generation", 0),
+                                            parents=cd.get("parents", []), operator=cd.get("operator", "elite"))
+                            candidates.append({
+                                "chromosome": ch, "source_eid": eid, "qualified": is_qual,
+                                "score": score, "created": created,
+                                "meta": {"type": "arena_combatant", "oos_pnl": oos_pnl, "consistency": cons, "source": eid}
+                            })
+
+        # 2. Check WFA final ranking
+        fin = store.artifact(eid, "final", "ranking")
+        if fin and isinstance(fin, dict) and "ranking" in fin:
+            for r in fin["ranking"]:
+                if isinstance(r, dict) and r.get("chromosome"):
+                    cd = r["chromosome"]
+                    if isinstance(cd, dict) and "genes" in cd:
+                        is_qual = r.get("status") == "QUALIFIED"
+                        scorecard = r.get("oos", {}).get("scorecard", {})
+                        oos_pnl = float(scorecard.get("net_pnl") or 0.0)
+                        sharpe = float(scorecard.get("sharpe") or 0.0)
+                        score = oos_pnl if oos_pnl != 0 else sharpe
+                        if is_qual or allow_unqualified:
+                            ch = Chromosome(genes=cd["genes"], generation=cd.get("generation", 0),
+                                            parents=cd.get("parents", []), operator=cd.get("operator", "elite"))
+                            candidates.append({
+                                "chromosome": ch, "source_eid": eid, "qualified": is_qual,
+                                "score": score, "created": created,
+                                "meta": {"type": "wfa_ranking", "oos_pnl": oos_pnl, "sharpe": sharpe, "source": eid}
+                            })
+
+    if requested == "latest" and candidates:
+        candidates.sort(key=lambda c: (c["created"], 1 if c["qualified"] else 0, c["score"]), reverse=True)
+        top = candidates[0]
+        return top["chromosome"], top["source_eid"], top["meta"]
+
+    qualified = [c for c in candidates if c["qualified"]]
+    pool = qualified if qualified else (candidates if allow_unqualified else [])
+
+    if not pool:
+        if allow_unqualified:
+            for exp in search_pool:
+                for cand in store.artifacts(exp["id"], "candidate"):
+                    if cand.get("status") != "FAILED_RISK" and cand.get("chromosome"):
+                        cd = cand["chromosome"]
+                        ch = Chromosome(genes=cd["genes"], generation=cd.get("generation", 0),
+                                        parents=cd.get("parents", []), operator=cd.get("operator", "elite"))
+                        return ch, exp["id"], {"type": "candidate_fallback", "source": exp["id"]}
+        raise SystemExit("No QUALIFIED chromosome found in any experiment. "
+                         "Run python -m app.cli train --config configs/binance.json --auto "
+                         "to evolve an anti-overfitting champion, or specify --allow-unqualified for research preview.")
+
+    pool.sort(key=lambda c: (1 if c["qualified"] else 0, c["score"], c["created"]), reverse=True)
+    best = pool[0]
+    return best["chromosome"], best["source_eid"], best["meta"]
 
 
 class LiveTrader:
@@ -99,6 +223,60 @@ class LiveTrader:
         self.emit("live_started", {"mode": "DRY_RUN" if dry_run else "BINANCE_TESTNET", "base": client.base,
                                    "symbol": self.sym, "chromosome": chromo.id, "source_experiment": source_eid,
                                    "rules": self.rules.__dict__})
+        if not self.dry:
+            self._initial_reconcile()
+
+    def _initial_reconcile(self):
+        """Immediately reconcile exchange position and account balance on startup."""
+        if self.dry:
+            return
+        try:
+            equity = self.x.equity()
+            pos = self.x.position(self.sym)
+            protect = [o for o in self.x.open_orders(self.sym) if o.get("type") in CONDITIONAL]
+        except Exception as e:
+            self.emit("exchange_error", {"error": f"Initial sync failed: {e}"})
+            return
+
+        self.st["peak"] = max(self.st.get("peak") or equity, equity)
+        now_ts = int(time.time())
+
+        qty = float(pos.get("qty") or 0.0)
+        if qty != 0:
+            entry = float(pos.get("entry") or 0.0)
+            upnl = float(pos.get("upnl") or 0.0)
+            side = "LONG" if qty > 0 else "SHORT"
+            if self.st.get("opened_ts") is None:
+                self.st["opened_ts"] = now_ts
+            self.st["position_anchor"] = {"entry": entry, "realized_pnl": None}
+            self.st["position_qty"] = qty
+            self.st["position_entry"] = entry
+            self.save()
+
+            rec = {
+                "bar_ts": now_ts,
+                "symbol": self.sym,
+                "qty": qty,
+                "side": side,
+                "entry": entry,
+                "upnl": upnl,
+                "equity": equity,
+                "protective_orders": len(protect),
+                "reconciled": True,
+            }
+            self.emit("position_reconnected", rec)
+            self.emit("position", rec | {"held_bars": 0})
+            print(f"[{time.strftime('%H:%M:%S')}] [RECONNECT] Active {side} position restored: {qty:+.4f} {self.sym} @ {entry:.2f} (uPnL: {upnl:+.2f} USDT, equity: , protect: {len(protect)} orders)", flush=True)
+            if len(protect) == 0:
+                print(f"[{time.strftime('%H:%M:%S')}] [WARNING] No exchange-side protective stop/take-profit orders found for open position!", flush=True)
+        else:
+            self.emit("account_sync", {
+                "bar_ts": now_ts,
+                "equity": equity,
+                "position": "FLAT",
+                "qty": 0.0,
+            })
+            print(f"[{time.strftime('%H:%M:%S')}] [SYNC] Account equity: , position: FLAT", flush=True)
 
     def emit(self, t: str, p: dict):
         self.store.append(self.eid, t, p)
@@ -254,15 +432,6 @@ class LiveTrader:
             return "KILLED"
         if self.st["halted"]:
             return "HALTED"
-        bars = self.bars()
-        if len(bars) < pipeline.MIN_BARS:
-            self.emit("defer", {"reason": f"only {len(bars)} closed bars"})
-            return "DEFER"
-        last = bars[-1]
-        if self.st["last_bar"] == last.ts:
-            return "SAME_BAR"
-        step_s = self.tf * 60
-        staleness = int((time.time() - (last.ts + step_s)) // step_s)
 
         equity = self.cfg.risk.initial_equity if self.dry else self.x.equity()
         pos = {"qty": 0.0} if self.dry else self.x.position(self.sym)
@@ -275,33 +444,58 @@ class LiveTrader:
             self.emit("halted", {"reason": "hard_drawdown", "drawdown": round(dd, 6), "equity": equity})
             return "HALTED"
 
-        self.st["last_bar"] = last.ts
-        self._check_and_run_re_evolution(bars, last.ts)
+        step_s = self.tf * 60
+        now_ts = int(time.time())
 
-        # Detect and reconcile existing open position on reconnect/restart
+        # If exchange position closed (e.g. hit stop or target while running)
+        if not pos["qty"] and self.st.get("opened_ts"):
+            self._cancel_all() if not self.dry else None
+            self.emit("position_closed", {"bar_ts": now_ts, "equity": equity})
+            self.st["opened_ts"] = None
+            self.st["position_qty"] = 0.0
+            self._record_learning_outcome(self.st.get("position_anchor") or {}, now_ts)
+            self.save()
+
+        # If holding an active position on exchange
         if pos["qty"]:
+            qty = float(pos["qty"])
+            side = "LONG" if qty > 0 else "SHORT"
             if self.st.get("opened_ts") is None:
-                # Reconnection recovery: adopt existing open exchange trade
-                self.st["opened_ts"] = last.ts
+                self.st["opened_ts"] = now_ts
                 self.emit("position_reconnected", {
-                    "bar_ts": last.ts, "qty": pos["qty"], "entry": pos.get("entry"),
-                    "upnl": pos.get("upnl"), "reconciled": True
+                    "bar_ts": now_ts, "qty": qty, "side": side,
+                    "entry": pos.get("entry"), "upnl": pos.get("upnl"), "equity": equity,
+                    "reconciled": True
                 })
-            held = (last.ts - (self.st["opened_ts"] or last.ts)) // step_s
+            held = (now_ts - (self.st["opened_ts"] or now_ts)) // step_s
             protect = [o for o in self.x.open_orders(self.sym) if o.get("type") in CONDITIONAL] if not self.dry else []
-            self.emit("position", {"bar_ts": last.ts, "qty": pos["qty"], "entry": pos.get("entry"),
-                                   "upnl": pos.get("upnl"), "held_bars": held, "equity": equity,
-                                   "protective_orders": len(protect)})
+            self.emit("position", {
+                "bar_ts": now_ts, "qty": qty, "side": side,
+                "entry": pos.get("entry"), "upnl": pos.get("upnl"), "held_bars": held, "equity": equity,
+                "protective_orders": len(protect)
+            })
             self.st["position_anchor"] = {"entry": pos.get("entry"), "realized_pnl": pos.get("realized_pnl")}
+            self.st["position_qty"] = qty
+            self.st["position_entry"] = float(pos.get("entry") or 0.0)
             if held >= self.c.g("stop_target", "max_hold_bars"):
                 self.flatten("time exit")
             self.save()
+
+        bars = self.bars()
+        if len(bars) < pipeline.MIN_BARS:
+            self.emit("defer", {"reason": f"only {len(bars)} closed bars"})
+            return "DEFER"
+        last = bars[-1]
+        staleness = int((time.time() - (last.ts + step_s)) // step_s)
+
+        if self.st["last_bar"] == last.ts:
+            return "MANAGED" if pos["qty"] else "SAME_BAR"
+
+        self.st["last_bar"] = last.ts
+        self._check_and_run_re_evolution(bars, last.ts)
+
+        if pos["qty"]:
             return "MANAGED"
-        if self.st["opened_ts"]:  # position closed on exchange by stop / target
-            self._cancel_all() if not self.dry else None
-            self.emit("position_closed", {"bar_ts": last.ts, "equity": equity})
-            self.st["opened_ts"] = None
-            self._record_learning_outcome(self.st.get("position_anchor") or {}, last.ts)
 
         t = len(bars) - 1
         eb = pipeline.build(PITView(bars, t))
@@ -412,5 +606,7 @@ class LiveTrader:
             if max_steps is not None and n >= max_steps:
                 break
             step_s = self.tf * 60
-            time.sleep(step_s - time.time() % step_s + self.cfg.live.close_grace_s)
+            time_to_bar = max(1.0, step_s - (time.time() % step_s) + self.cfg.live.close_grace_s)
+            sleep_s = min(time_to_bar, 15.0) if (self.st.get("opened_ts") and not self.dry) else time_to_bar
+            time.sleep(sleep_s)
         return "DONE"
