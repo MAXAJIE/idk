@@ -40,7 +40,8 @@ def resolve_experiment(store: Store, requested: str) -> str:
     experiments = store.experiments()
     if requested == "latest":
         eligible = [e for e in experiments if e["state"] == "COMPLETED"
-                    and store.artifact(e["id"], "final", "ranking") is not None]
+                    and (store.artifact(e["id"], "final", "ranking") is not None
+                         or store.artifact(e["id"], "arena", "result") is not None)]
         if eligible:
             return eligible[0]["id"]
         raise SystemExit("No completed research experiment. Run: python -m app.cli run; then experiments.")

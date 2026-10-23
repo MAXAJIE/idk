@@ -199,6 +199,46 @@ def run(cfg: ExperimentConfig, store: Store) -> str:
                                                           disc_mod.technical(evidence[holdout[0]]).model_dump()]})
     if cfg.llm.narrate == "elite_only" and not any(r["status"] == "QUALIFIED" for r in final):
         explain_experiment(store, eid, cfg)
+    from app.learning.arena import ArenaResult, ArenaCombatant
+    combatants = []
+    for r in final:
+        c_obj = next((a for a in archive if a.id == r["id"]), None)
+        if c_obj:
+            h_card = r.get("holdout", {})
+            combatants.append(ArenaCombatant(
+                chromosome=c_obj,
+                is_pnl=round(retained_meta.get(c_obj.id, {}).get("adjusted_net", 0.0), 4),
+                is_drawdown=0.0,
+                oos_pnl=round(h_card.get("net_pnl", 0.0), 4),
+                oos_drawdown=round(h_card.get("max_drawdown", 0.0), 4),
+                consistency=round(r["consistency"], 4),
+                neighbour_retention=1.0,
+                qualified=r["status"] == "QUALIFIED",
+                status_reason=r["status"],
+                is_trades=0,
+                is_win_rate=0.0,
+                oos_trades=h_card.get("n_trades", 0),
+                oos_win_rate=round(h_card.get("win_rate", 0.0) or 0.0, 4),
+                positive_oos_folds=int(round(r["consistency"] * r["windows"])),
+                total_oos_folds=r["windows"],
+            ))
+    qualified_rows = [r for r in final if r["status"] == "QUALIFIED"]
+    champ_obj = next((a for a in archive if a.id == qualified_rows[0]["id"]), None) if qualified_rows else None
+    champ_h = qualified_rows[0].get("holdout", {}) if qualified_rows else {}
+    arena_res = ArenaResult(
+        champion=champ_obj,
+        total_spawned=cfg.ga.population * len(folds),
+        is_survivors=len(archive),
+        oos_qualifiers=len(qualified_rows),
+        combatants=combatants,
+        champion_oos_pnl=round(champ_h.get("net_pnl", 0.0), 4),
+        champion_consistency=round(qualified_rows[0]["consistency"], 4) if qualified_rows else 0.0,
+        summary=f"WFA champion {champ_obj.id} crowned: holdout PnL={champ_h.get('net_pnl', 0.0):.2f}, consistency={qualified_rows[0]['consistency']:.2f}" if champ_obj else "WFA run completed; no candidate qualified all gates.",
+        decisions=h.get("decisions", [])[-40:] if 'h' in locals() and isinstance(h, dict) else [],
+    )
+    store.put(eid, "arena", "result", arena_res.to_dict())
+    store.put(eid, "arena", "plan", {"mode": "wfa_arena", "population": cfg.ga.population, "generations": cfg.ga.generations})
+
     store.put(eid, "final", "ranking", {"ranking": final, "holdout_window": list(holdout)})
     emit("final_ranking", {"qualified": [r["id"] for r in final if r["status"] == "QUALIFIED"], "n_archive": len(archive)})
     sm.to("COMPLETED")

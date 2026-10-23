@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.agents.narration import explain_experiment, explain_records
+from app.cli import prepare_trade_config
 from app.agents.provider import FailedProvider, LLMError, OpenAICompatibleProvider, get_provider, llm_status
 from app.genetic.population import initial
 from app.live.runner import LiveTrader, find_best_chromosome, pick_chromosome, resolve_experiment
@@ -65,6 +66,31 @@ def test_qualified_selection(tmp_path, cfg):
     st.put("exp_real", "final", "ranking", {"ranking": [{"status": "QUALIFIED", "chromosome": c.to_dict()}]})
     assert pick_chromosome(st, "exp_real").id == c.id
 
+
+
+def test_trade_config_allows_non_binance_research_only_for_dry_run(cfg):
+    preview_cfg, preview_only = prepare_trade_config(cfg, dry_run=True)
+    assert preview_only is True
+    assert preview_cfg.data.source == "binance"
+    assert preview_cfg.data.symbol == "BTCUSDT"
+    assert preview_cfg.data.exchange == "BINANCE_USDM"
+    assert cfg.data.source == "synthetic"
+    assert cfg.data.symbol == "BTC-PERP"
+
+
+def test_trade_config_preserves_explicit_symbol_for_dry_run(cfg):
+    csv_cfg = cfg.model_copy(update={"data": cfg.data.model_copy(update={
+        "source": "csv", "symbol": "ETHUSDT"
+    })})
+    preview_cfg, preview_only = prepare_trade_config(csv_cfg, dry_run=True)
+    assert preview_only is True
+    assert preview_cfg.data.source == "binance"
+    assert preview_cfg.data.symbol == "ETHUSDT"
+
+
+def test_trade_config_rejects_non_binance_research_for_orders(cfg):
+    with pytest.raises(ValueError, match="requires a Binance research experiment"):
+        prepare_trade_config(cfg, dry_run=False)
 
 
 def test_best_auto_selects_highest_scoring_qualified_arena_champion(tmp_path, cfg):
@@ -178,6 +204,32 @@ def test_narrate_none_makes_no_call(tmp_path, cfg):
     assert explain_records(st, "exp_real", cfg, [record()], "test", NoCall()) == []
 
 
+
+def test_explain_experiment_uses_persisted_arena_decisions(tmp_path, cfg, monkeypatch):
+    st = research(tmp_path, cfg)
+    st.put("exp_real", "arena", "result", {"champion": {"id": "chr_arena"}})
+    st.put("exp_real", "arena", "decisions", {"decisions": [record()]})
+
+    class FakeLLM:
+        name = "fake"
+        def narrate(self, r):
+            return "Decision was deferred citing ev:atr:1."
+
+    monkeypatch.setattr("app.agents.narration.get_provider", lambda *a: FakeLLM())
+    rows = explain_experiment(st, "exp_real", cfg)
+    assert len(rows) == 1
+    assert rows[0]["scope"] == "arena_champion"
+    assert rows[0]["decision_id"] == "d1"
+    assert rows[0]["valid"] is True
+
+
+def test_arena_result_records_champion_decisions():
+    from app.learning.arena import ArenaResult
+    result = ArenaResult(champion=None, total_spawned=0, is_survivors=0,
+                         oos_qualifiers=0, combatants=[], decisions=[record()])
+    assert result.to_dict()["decisions"] == [record()]
+
+
 def test_root_and_backend_launch_share_defaults():
     root = Path(__file__).parents[2]
     env = {k: v for k, v in os.environ.items() if not k.startswith("LLM_")}
@@ -283,3 +335,56 @@ def test_approved_dry_run_llm_http_and_api_readback(tmp_path, cfg, monkeypatch):
         assert not any(e["type"] == "order" for e in st.events(live.eid))
     finally:
         server.shutdown(); server.server_close(); thread.join()
+
+def test_explain_experiment_arena_synthetic_fallback(tmp_path, cfg, monkeypatch):
+    from app.persistence.db import Store
+    st = Store(str(tmp_path / "test_arena_fb.sqlite"))
+    eid = "arena_1792731206538"
+    broken_cfg = cfg.model_copy(update={"data": cfg.data.model_copy(update={"source": "csv", "path": "/nonexistent/path.csv"})})
+    st.create_experiment(eid, "arena", broken_cfg.model_dump())
+    st.set_state(eid, "COMPLETED")
+    arena_res = {
+        "champion": {"id": "chr_arena_champ", "genes": {}, "generation": 0},
+        "champion_oos_pnl": 15.5,
+        "champion_consistency": 0.75,
+        "summary": "Champion crowned in combat",
+        "combatants": [],
+    }
+    st.put(eid, "arena", "result", arena_res)
+    class FakeLLM:
+        name = "fake"
+        def narrate(self, r):
+            evs = " ".join(r["proposal"]["evidence_ids"])
+            return f"Trader proposed {r['proposal']['side']} citing {evs}. Risk: {r['risk']['outcome']}."
+    monkeypatch.setattr("app.agents.narration.get_provider", lambda *a: FakeLLM())
+    rows = explain_experiment(st, eid, broken_cfg)
+    assert len(rows) == 1
+    assert rows[0]["scope"] == "arena_champion"
+    assert rows[0]["decision_id"] == "dec:chr_arena_champ:arena"
+    assert rows[0]["valid"] is True
+
+
+def test_resolve_experiment_latest_supports_arena(tmp_path, cfg):
+    from app.persistence.db import Store
+    st = Store(str(tmp_path / "test_latest.sqlite"))
+    st.create_experiment("exp_old", "wfa", cfg.model_dump())
+    st.set_state("exp_old", "COMPLETED")
+    st.put("exp_old", "final", "ranking", {"ranking": []})
+    st.create_experiment("arena_latest", "arena", cfg.model_dump())
+    st.set_state("arena_latest", "COMPLETED")
+    st.put("arena_latest", "arena", "result", {"summary": "done"})
+    assert resolve_experiment(st, "latest") == "arena_latest"
+
+
+def test_wfa_runner_persists_combined_arena_result(tmp_path, cfg):
+    from app.orchestration.runner import run
+    from app.persistence.db import Store
+    st = Store(str(tmp_path / "wfa_arena.sqlite"))
+    cfg = cfg.model_copy(update={
+        "ga": cfg.ga.model_copy(update={"population": 6, "generations": 1}),
+        "wfa": cfg.wfa.model_copy(update={"n_folds": 2, "is_bars": 60, "oos_bars": 30, "step_bars": 30, "min_oos_folds": 1}),
+    })
+    eid = run(cfg, st)
+    assert st.artifact(eid, "final", "ranking") is not None
+    assert st.artifact(eid, "arena", "result") is not None
+    assert st.artifact(eid, "arena", "plan") is not None

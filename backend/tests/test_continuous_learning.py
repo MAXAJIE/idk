@@ -192,3 +192,41 @@ def test_arena_records_profitable_oos_fold_count():
     serialized = record.to_dict()
     assert serialized["positive_oos_folds"] == 1
     assert serialized["total_oos_folds"] == 3
+
+
+def test_arena_selection_fitness_penalizes_is_wfa_gap_and_complexity():
+    from app.learning.arena import selection_fitness
+
+    consistent, robust, gap = selection_fitness(10.0, [9.0, 8.0, 7.0], complexity=0.0)
+    overfit, _, overfit_gap = selection_fitness(10.0, [3.0, 8.0, 7.0], complexity=0.0)
+    simpler, _, _ = selection_fitness(10.0, [9.0, 8.0, 7.0], complexity=2.0)
+
+    assert robust == 7.4  # weighted worst and median folds
+    assert abs(gap - 2.6) < 1e-9
+    assert overfit_gap > gap
+    assert overfit < consistent
+    assert simpler < consistent
+
+
+def test_auto_train_stops_after_single_holdout_attempt(monkeypatch):
+    from app.learning import arena
+
+    calls = []
+    result = arena.ArenaResult(
+        champion=None, total_spawned=8, is_survivors=2, oos_qualifiers=1,
+        combatants=[], summary="final holdout failed", holdout_attempted=True,
+    )
+
+    def fake_train(**kwargs):
+        calls.append(kwargs)
+        return result
+
+    monkeypatch.setattr(arena, "train_and_combat", fake_train)
+    cfg = load_config(Path(__file__).parents[1] / "configs/default.json")
+    returned, rounds = arena.auto_train_until_survivor(
+        bars=[], cfg=cfg, pop_size=8, generations=4, max_rounds=10,
+    )
+
+    assert returned is result
+    assert rounds == 1
+    assert len(calls) == 1

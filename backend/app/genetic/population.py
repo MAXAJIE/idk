@@ -38,8 +38,12 @@ def next_generation(rng: random.Random, scored: list[tuple[Chromosome, float]], 
     out: list[Chromosome] = []
     discarded = 0
     while len(out) < n:
-        child = offspring(rng, tournament(rng, pool, ga.tournament_k), tournament(rng, pool, ga.tournament_k),
-                          gen, ga.crossover_rate, ga.mutation_rate, ga.operator_version)
+        p1 = tournament(rng, pool, ga.tournament_k)
+        p2 = tournament(rng, pool, ga.tournament_k)
+        # Anti-incest / anti-clone check: prevent identical parents from collapsing diversity
+        if len(pool) > 2 and gene_distance(p1, p2) < 0.04:
+            p2 = tournament(rng, pool, ga.tournament_k)
+        child = offspring(rng, p1, p2, gen, ga.crossover_rate, ga.mutation_rate, ga.operator_version)
         if child is None:
             discarded += 1
             continue

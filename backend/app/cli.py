@@ -30,6 +30,24 @@ def backend_path(value):
     return str(path if path.is_absolute() else BACKEND / path)
 
 
+def prepare_trade_config(cfg: ExperimentConfig, dry_run: bool) -> tuple[ExperimentConfig, bool]:
+    """Allow offline research configs only for a no-orders Binance testnet preview."""
+    if cfg.data.source == "binance":
+        return cfg, False
+    if not dry_run:
+        raise ValueError("trade requires a Binance research experiment, not synthetic/CSV data")
+
+    # The default offline config uses a simulator-only symbol; use the matching
+    # Binance market for preview prices while preserving any explicit symbol.
+    symbol = "BTCUSDT" if cfg.data.symbol in {"BTC-PERP", "SIM"} else cfg.data.symbol
+    data = cfg.data.model_copy(update={
+        "source": "binance",
+        "symbol": symbol,
+        "exchange": "BINANCE_USDM",
+    })
+    return cfg.model_copy(update={"data": data}), True
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -96,8 +114,17 @@ def main():
         cfg = load_config(backend_path(a.config)) if a.config else ExperimentConfig.model_validate(exp["config"])
         if a.auto_re_evolve:
             cfg = cfg.model_copy(update={"live": cfg.live.model_copy(update={"auto_re_evolve": True})})
-        if cfg.data.source != "binance":
-            ap.error("trade requires a Binance research experiment, not synthetic/CSV data")
+        try:
+            cfg, previewing_non_binance_research = prepare_trade_config(cfg, a.dry_run)
+        except ValueError as e:
+            ap.error(str(e))
+        if previewing_non_binance_research:
+            original_source = exp["config"].get("data", {}).get("source", "unknown")
+            print(
+                f"warning: dry-run only; strategy was researched with {original_source} data, "
+                f"while preview prices come from Binance testnet ({cfg.data.symbol}); no orders will be sent",
+                flush=True,
+            )
         state = backend_path(a.state or ("data/dry_state.json" if a.dry_run else "data/live_state.json"))
         print(f"source experiment: {eid}; mode: {'DRY_RUN (no orders)' if a.dry_run else 'BINANCE_TESTNET'}", flush=True)
         lt = LiveTrader(cfg, chromo, store,
@@ -162,6 +189,72 @@ def main():
                 rounds = 1
             print(analyze_arena_result(res, cfg, round_num=rounds))
             st.put(eid, "arena", "result", res.to_dict())
+            if res.decisions:
+                st.put(eid, "arena", "decisions", {"decisions": res.decisions})
+
+            # Save combined WFA artifacts so arena training also has full WFA ranking & inspectability
+            from app.validation.walk_forward import make_folds
+            from app.features import pipeline
+            try:
+                folds, holdout = make_folds(len(bars), pipeline.LOOKBACK, cfg.wfa)
+                st.put(eid, "dataset", "snapshot", snap.to_dict())
+                st.put(eid, "market", "bars", {"bars": [[b.ts, b.open, b.high, b.low, b.close, b.volume] for b in bars]})
+                st.put(eid, "folds", "all", {"folds": [f.to_dict() for f in folds], "holdout": list(holdout), "embargo": cfg.wfa.embargo_bars})
+            except Exception:
+                holdout = [0, len(bars)]
+
+            final_ranking = []
+            for comb in res.combatants:
+                final_ranking.append({
+                    "id": comb.chromosome.id,
+                    "fold": 0,
+                    "windows": comb.total_oos_folds,
+                    "consistency": comb.consistency,
+                    "status": "QUALIFIED" if comb.qualified else ("WFA_QUALIFIED" if comb.wfa_qualified else "REJECTED"),
+                    "rank_net": comb.selection_score,
+                    "chromosome": comb.chromosome.to_dict(),
+                    "wfa": {
+                        "net_pnl": comb.oos_pnl,
+                        "net_return": comb.oos_return,
+                        "max_drawdown": comb.oos_drawdown,
+                        "n_trades": comb.oos_trades,
+                        "win_rate": comb.oos_win_rate,
+                    },
+                    "holdout": ({
+                        "net_pnl": comb.holdout_pnl,
+                        "max_drawdown": comb.holdout_drawdown,
+                        "n_trades": comb.holdout_trades,
+                        "win_rate": comb.holdout_win_rate,
+                        "passed": comb.holdout_passed,
+                    } if comb.holdout_pnl is not None else None),
+                })
+            final_ranking.sort(key=lambda x: (x["status"] != "QUALIFIED", -x["rank_net"] * (0.5 + 0.5 * x["consistency"])))
+            st.put(eid, "final", "ranking", {"ranking": final_ranking, "holdout_window": list(holdout)})
+
+            for comb in res.combatants:
+                st.put(eid, "candidate", f"0:{comb.chromosome.id}", {
+                    "fold": 0,
+                    "chromosome": comb.chromosome.to_dict(),
+                    "status": "QUALIFIED" if comb.qualified else ("WFA_QUALIFIED" if comb.wfa_qualified else "REJECTED"),
+                    "consistency": comb.consistency,
+                    "robustness": {"retention": comb.neighbour_retention},
+                    "oos": {"scorecard": {"net_pnl": comb.oos_pnl, "net_return": comb.oos_return, "max_drawdown": comb.oos_drawdown, "n_trades": comb.oos_trades, "win_rate": comb.oos_win_rate}},
+                })
+
+            if res.champion and res.holdout_attempted:
+                st.put(eid, "holdout", res.champion.id, {
+                    "result": {"scorecard": {"net_pnl": res.champion_oos_pnl}},
+                    "decisions": (res.decisions or [])[-40:],
+                    "narration": [],
+                })
+
+            st.append(eid, "final_ranking", {
+                "qualified": [c.chromosome.id for c in res.combatants if c.qualified],
+                "wfa_qualified": [c.chromosome.id for c in res.combatants if c.wfa_qualified],
+                "n_combatants": len(res.combatants),
+                "champion": res.champion.id if res.champion else None,
+            })
+
             st.set_state(eid, "COMPLETED")
             print(f"Saved arena results to experiment {eid} in database {a.db}")
         except Exception as exc:
@@ -179,8 +272,10 @@ def main():
         rows = explain_experiment(store, eid, cfg)
         for n in rows:
             print(n["decision_id"], n["text"] or n["error"])
-        if not rows or any(n["error"] for n in rows):
+        if any(n.get("error") for n in rows):
             raise SystemExit("LLM explanation incomplete; run python -m app.cli llm-test for diagnostics.")
+        if not rows:
+            print(f"No persisted decisions available to explain in experiment {eid}.")
     else:
         import uvicorn
         from app.api.read_only import create_app
