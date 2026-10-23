@@ -1,0 +1,73 @@
+/* Design tokens. Every colour used in components comes from here. */
+:root {
+  --bg: oklch(0.17 0.012 250);
+  --panel: oklch(0.21 0.014 250);
+  --panel-2: oklch(0.25 0.016 250);
+  --line: oklch(0.32 0.016 250);
+  --text: oklch(0.93 0.01 250);
+  --muted: oklch(0.68 0.02 250);
+  --accent: oklch(0.82 0.15 85);   /* amber: attention, selection */
+  --pos: oklch(0.78 0.14 155);
+  --neg: oklch(0.68 0.19 25);
+  --warn: oklch(0.8 0.15 70);
+  --info: oklch(0.75 0.1 230);
+  --font: "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+  --r: 6px;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 var(--font); }
+h1, h2, h3 { margin: 0; font-weight: 600; }
+h2 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
+.mono, td, code { font-family: var(--mono); font-size: 12px; }
+
+.banner { background: var(--warn); color: var(--bg); font: 600 12px var(--mono); padding: 6px 20px; letter-spacing: .04em; }
+.top { display: flex; gap: 16px; align-items: center; padding: 14px 20px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.top h1 { font-size: 16px; }
+.top h1 span { color: var(--accent); }
+.spacer { flex: 1; }
+.layout { display: grid; grid-template-columns: 300px minmax(0, 1fr) 320px; gap: 14px; padding: 14px 20px; align-items: start; }
+@media (max-width: 1200px) { .layout { grid-template-columns: 1fr; } }
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 14px; margin-bottom: 14px; min-width: 0; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+
+select { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: var(--r); padding: 6px 8px; font: 12px var(--mono); }
+
+.pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font: 600 11px var(--mono); border: 1px solid currentColor; }
+.s-good { color: var(--pos); } .s-bad { color: var(--neg); } .s-warn { color: var(--warn); } .s-info { color: var(--info); } .s-muted { color: var(--muted); }
+
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; color: var(--muted); font: 500 11px var(--font); text-transform: uppercase; letter-spacing: .05em; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+td { padding: 4px 6px; border-bottom: 1px solid var(--panel-2); white-space: nowrap; }
+.scroll { overflow: auto; max-height: 340px; }
+
+.row { cursor: pointer; padding: 8px; border-radius: var(--r); border: 1px solid transparent; margin-bottom: 6px; background: var(--panel-2); }
+.row:hover { border-color: var(--line); }
+.row.sel { border-color: var(--accent); }
+.row .id { font: 600 12px var(--mono); }
+.row .meta { color: var(--muted); font-size: 12px; }
+
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font: 12px var(--mono); }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; }
+
+.chart { width: 100%; height: 180px; display: block; }
+.chart .eq { fill: none; stroke: var(--pos); stroke-width: 1.5; }
+.chart .dd { fill: var(--neg); opacity: .35; }
+.chart .px { fill: none; stroke: var(--info); stroke-width: 1.2; }
+.chart .long { fill: var(--pos); } .chart .short { fill: var(--neg); }
+.chart .axis { stroke: var(--line); }
+
+.turn { border-left: 3px solid var(--line); padding: 4px 10px; margin: 6px 0; }
+.turn.bull { border-color: var(--pos); } .turn.bear { border-color: var(--neg); }
+.turn li { font-size: 12px; }
+.ev { color: var(--accent); font: 11px var(--mono); }
+.check { display: flex; gap: 8px; font: 12px var(--mono); padding: 2px 0; }
+.events { max-height: 520px; overflow: auto; font: 11px var(--mono); }
+.events div { overflow-wrap: anywhere; padding: 3px 0; border-bottom: 1px solid var(--panel-2); }
+.events .t { color: var(--accent); }
+.empty { color: var(--muted); font-style: italic; font-size: 12px; }
+.err { color: var(--neg); font: 12px var(--mono); }
