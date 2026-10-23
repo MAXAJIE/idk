@@ -79,7 +79,7 @@ def _content(data: dict) -> str:
     if isinstance(c, list):
         c = "".join(p.get("text", "") for p in c if isinstance(p, dict))
     if not c or not str(c).strip():
-        raise LLMError("empty completion")
+        raise LLMError("empty completion; if finish_reason=length, increase LLM_MAX_TOKENS (reasoning consumed the output budget)")
     return str(c).strip()
 
 
@@ -140,7 +140,13 @@ class OpenAICompatibleProvider(Provider):
         raise last  # pragma: no cover
 
     def narrate(self, record: dict) -> str:
-        return self.chat(SYSTEM, json.dumps(record, default=str)[:12000])
+        try:
+            budget = int(os.environ.get("LLM_MAX_TOKENS", "2048"))
+        except ValueError:
+            raise LLMError("LLM_MAX_TOKENS must be a positive integer") from None
+        if budget <= 0:
+            raise LLMError("LLM_MAX_TOKENS must be a positive integer")
+        return self.chat(SYSTEM, json.dumps(record, default=str), max_tokens=budget)
 
 
 class FailedProvider(Provider):

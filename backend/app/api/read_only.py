@@ -84,7 +84,9 @@ def create_app(db_path: str = DB) -> FastAPI:
     @app.get("/api/experiments/{eid}/final")
     def final(eid: str):
         return {"final": store.artifact(eid, "final", "ranking"), "holdout": store.artifacts(eid, "holdout"),
-                "narration": store.artifacts(eid, "narration")}
+                "narration": [{"scope": "holdout", "narration": h["narration"]}
+                              for h in store.artifacts(eid, "holdout") if h.get("narration")]
+                             + store.artifacts(eid, "narration")}
 
     @app.get("/api/experiments/{eid}/training")
     def training(eid: str):

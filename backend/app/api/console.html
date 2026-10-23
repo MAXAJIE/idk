@@ -72,6 +72,7 @@
 </nav>
 
 <main>
+    <section class="card s12"><h2><span class="dot" id="llmDot"></span> LLM narration <span class="note" id="llmInfo"></span></h2><div class="scroll" id="narration"><div class="empty">—</div></div></section>
   <!-- TRAINING -->
   <div class="tab grid on" id="tab-training">
     <section class="card s12">
@@ -103,13 +104,12 @@
       <p class="note">Start: <code>python -m app.cli trade --experiment latest --dry-run</code> (no orders) or without <code>--dry-run</code> for testnet.</p>
     </section>
     <section class="card s12"><h2>Decisions &amp; orders</h2><div class="scroll" id="liveEvents"><div class="empty">—</div></div></section>
-    <section class="card s12"><h2><span class="dot" id="llmDot"></span> LLM narration <span class="note" id="llmInfo"></span></h2><div class="scroll" id="narration"><div class="empty">—</div></div></section>
   </div>
 
   <!-- DEBATE -->
   <div class="tab grid" id="tab-debate">
     <section class="card s12">
-      <h2><span class="dot" id="anDot"></span> Bull vs bear debate · last closed candle <span class="note" id="anNote"></span></h2>
+      <h2><span class="dot" id="anDot"></span> Rule-based bull vs bear · last closed candle <span class="note" id="anNote"></span></h2>
       <div id="verdict"><div class="empty">Loading…</div></div>
     </section>
     <section class="card s6"><div class="side bull" id="bull"></div></section>
@@ -218,7 +218,7 @@ async function refreshTraining() {
   $("verdicts").innerHTML = table([["Fold", "num"], ["Gene"], ["Judge"], ["Status"], ["Why"]],
     train.verdicts.slice().reverse().map(v => `<tr><td class="num">${v.fold + 1}</td><td class="mono">${esc(v.id)}</td><td>${pill(v.verdict)}</td><td>${pill(v.status)}</td><td class="wrap muted">${esc((v.flags || []).join(", ") || v.rationale || "")}</td></tr>`));
   drawTraining();
-  if (!running) refreshFinal();
+  refreshFinal();
 }
 function drawTraining() {
   if (!train || tab !== "training") return;
@@ -238,9 +238,14 @@ async function refreshFinal() {
       rows.map((r, i) => `<tr><td>${i + 1}</td><td class="mono">${esc(r.id)}</td><td>${pill(r.status)}</td><td class="num">${r.fold != null ? r.fold + 1 : ""}</td><td class="num">${r.windows ?? ""}</td><td class="num">${fmt(r.consistency * 100, 0)}%</td><td class="num ${cls(r.rank_net)}">${fmt(r.rank_net)}</td><td class="num ${cls(r.holdout?.net_pnl)}">${fmt(r.holdout?.net_pnl)}</td></tr>`))
       : `<div class="empty">No ranking yet (it is written when training reaches the final stage).</div>`;
     const narr = f.narration || [];
-    $("narration").innerHTML = narr.length ? narr.flatMap(n => (n.narration || n.items || [n]).map(x =>
-      `<div class="narr ${x.ok === false || x.error ? "bad" : ""}"><div class="muted mono">${esc(n.id || n.scope || "")} ${esc(x.decision_id || "")} · ${esc(n.provider || x.provider || "")}</div>${esc(x.text || x.narration || x.reason || x.error || JSON.stringify(x).slice(0, 400))}</div>`)).join("")
+    const latest = narr.flatMap(n => n.narration || n.items || [n]).at(-1);
+    const label = latest?.error ? "LLM call failed" : latest?.provider?.startsWith("offline") ? "Offline template (not LLM)" : latest?.valid === false ? "Reply has unsupported citations" : latest?.text ? "LLM reply saved" : "No LLM call saved";
+    $("llmDot").className = "dot" + (label === "LLM reply saved" ? " on" : latest?.error ? " err" : "");
+    $("llmInfo").textContent = label + (latest?.provider ? " · " + latest.provider : "");
+    $("narration").innerHTML = narr.length ? narr.slice().reverse().flatMap(n => (n.narration || n.items || [n]).slice().reverse().map(x =>
+      `<div class="narr ${x.valid === false || x.error ? "bad" : ""}"><div class="muted mono">${esc(n.id || n.scope || "")} ${esc(x.decision_id || "")} · ${esc(n.provider || x.provider || "")}</div>${esc(x.text || x.narration || x.reason || x.error || JSON.stringify(x).slice(0, 400))}</div>`)).join("")
       : `<div class="empty">No narration saved yet. Run <code>python -m app.cli explain --experiment latest</code>.</div>`;
+    if (eid) $("narration").innerHTML += `<div class="muted">Refresh saved explanations: <code>${esc('python -m app.cli explain --experiment "' + eid + '"')}</code></div>`;
   } catch (e) { $("ranking").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 
@@ -279,8 +284,8 @@ async function refreshLiveEvents() {
   renderPastDebates();
 }
 async function refreshLlm() { try { const s = await j("/api/llm");
-  $("llmDot").className = "dot " + (s.configured || s.ok ? "on" : "err");
-  $("llmInfo").textContent = [s.configured ? "configured" : "not configured", s.base_url, s.model, s.missing?.length ? "missing " + s.missing.join(", ") : ""].filter(Boolean).join(" · "); } catch {} }
+  $("llmDot").className = "dot " + ("");
+  $("llmInfo").textContent = [s.configured ? "config ready (not proof of a successful call)" : "not configured", s.base_url, s.model, s.missing?.length ? "missing " + s.missing.join(", ") : ""].filter(Boolean).join(" · "); } catch {} }
 
 // ---------- debate & indicators
 let an = null;

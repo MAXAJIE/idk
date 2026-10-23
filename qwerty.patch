@@ -1,98 +1,139 @@
-diff --git a/backend/app/api/console.html b/backend/app/api/console.html
---- a/backend/app/api/console.html
-+++ b/backend/app/api/console.html
-@@ -5,45 +5,45 @@
- <meta name="viewport" content="width=device-width, initial-scale=1">
- <title>CGTRS · Console</title>
- <style>
--  :root{--bg:#0e1116;--panel:#161b22;--panel2:#1c222b;--line:#2a313c;--text:#e6e9ee;--muted:#8b95a5;--dim:#5c6675;
-+  :root{--bg:#0e1116;--panel:#161b22;--panel2:#1c222b;--line:#2a313c;--text:#eef1f5;--muted:#a3adbb;--dim:#7a8494;
-     --up:#2fbf71;--down:#ef5350;--warn:#e3b341;--accent:#4aa8ff;--violet:#b48cff;
-     --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans SC",sans-serif}
-   *{box-sizing:border-box}
--  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 var(--sans)}
-+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 var(--sans)}
-   header{display:flex;align-items:center;gap:14px;padding:10px 20px;border-bottom:1px solid var(--line);
-     position:sticky;top:0;background:var(--bg);z-index:5;flex-wrap:wrap}
-   h1{font-size:15px;margin:0;font-weight:600}h1 small{color:var(--muted);font-weight:400;margin-left:6px}
-   .grow{flex:1}
-   select{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit;max-width:340px}
-   nav{display:flex;gap:4px;padding:0 20px;border-bottom:1px solid var(--line);background:var(--bg);position:sticky;top:53px;z-index:4}
--  nav button{background:none;border:0;color:var(--muted);font:600 13px var(--sans);padding:12px 16px;cursor:pointer;border-bottom:2px solid transparent}
-+  nav button{background:none;border:0;color:var(--muted);font:600 15px var(--sans);padding:14px 20px;cursor:pointer;border-bottom:2px solid transparent}
-   nav button.on{color:var(--text);border-color:var(--accent)}
-   .tab{display:none}.tab.on{display:grid}
-   main{padding:20px;max-width:1500px;margin:0 auto}
-   .grid{gap:16px;grid-template-columns:repeat(12,1fr)}
-   .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;min-width:0}
--  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 12px;font-weight:600;display:flex;align-items:center;gap:8px}
-+  .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 12px;font-weight:600;display:flex;align-items:center;gap:8px}
-   .s12{grid-column:span 12}.s8{grid-column:span 8}.s4{grid-column:span 4}.s6{grid-column:span 6}
-   @media(max-width:1000px){.s8,.s4,.s6{grid-column:span 12}}
-   .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px}
--  .stat .k{font-size:12px;color:var(--muted)}.stat .v{font:600 20px/1.3 var(--mono)}.stat .v.sm{font-size:15px}
-+  .stat .k{font-size:13px;color:var(--muted)}.stat .v{font:600 22px/1.3 var(--mono)}.stat .v.sm{font-size:16px}
-   .up{color:var(--up)}.down{color:var(--down)}.warn{color:var(--warn)}.muted{color:var(--muted)}.mono{font-family:var(--mono)}
-   .dot{width:8px;height:8px;border-radius:50%;background:var(--dim);display:inline-block}
-   .dot.on{background:var(--up);box-shadow:0 0 6px var(--up)}.dot.err{background:var(--down)}
-   canvas{width:100%;height:300px;display:block}canvas.short{height:150px}
--  table{width:100%;border-collapse:collapse;font-size:13px}
--  th,td{padding:6px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
--  th{color:var(--muted);font-weight:500;font-size:12px;position:sticky;top:0;background:var(--panel)}
-+  table{width:100%;border-collapse:collapse;font-size:14px}tbody tr:nth-child(even){background:#131820}tbody tr:hover{background:var(--panel2)}
-+  th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
-+  th{color:var(--muted);font-weight:600;font-size:13px;position:sticky;top:0;background:var(--panel)}
-   td.num,th.num{text-align:right;font-family:var(--mono)}td.wrap{white-space:normal}
-   .scroll{max-height:360px;overflow:auto}
--  .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600;border:1px solid currentColor}
-+  .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid currentColor}
-   .bar{height:8px;background:var(--panel2);border-radius:99px;overflow:hidden}.bar i{display:block;height:100%;background:var(--accent)}
-   .legend{display:flex;gap:14px;font-size:12px;color:var(--muted)}.legend b{display:inline-block;width:10px;height:3px;margin-right:5px;vertical-align:middle}
-   .side{border-radius:8px;padding:12px;background:var(--panel2);border-top:3px solid var(--dim)}
-   .side.bull{border-color:var(--up)}.side.bear{border-color:var(--down)}
-   .side ul{margin:6px 0;padding-left:18px}.side li{margin:3px 0}
-   .ev{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
--  .ev div{background:var(--panel2);border-radius:8px;padding:10px;font:12px/1.5 var(--mono);word-break:break-word}
-+  .ev div{background:var(--panel2);border-radius:8px;padding:12px;font:13px/1.6 var(--mono);word-break:break-word}
-   .ev b{display:block;font:600 11px var(--sans);text-transform:uppercase;color:var(--muted);margin-bottom:4px}
-   .meter{position:relative;height:12px;border-radius:99px;background:linear-gradient(90deg,var(--down),var(--panel2) 50%,var(--up))}
-   .meter i{position:absolute;top:-4px;width:4px;height:20px;background:var(--text);border-radius:2px}
+diff --git a/backend/app/agents/provider.py b/backend/app/agents/provider.py
+--- a/backend/app/agents/provider.py
++++ b/backend/app/agents/provider.py
+@@ -79,7 +79,7 @@
+     if isinstance(c, list):
+         c = "".join(p.get("text", "") for p in c if isinstance(p, dict))
+     if not c or not str(c).strip():
+-        raise LLMError("empty completion")
++        raise LLMError("empty completion; if finish_reason=length, increase LLM_MAX_TOKENS (reasoning consumed the output budget)")
+     return str(c).strip()
+ 
+ 
+@@ -140,7 +140,13 @@
+         raise last  # pragma: no cover
+ 
+     def narrate(self, record: dict) -> str:
+-        return self.chat(SYSTEM, json.dumps(record, default=str)[:12000])
++        try:
++            budget = int(os.environ.get("LLM_MAX_TOKENS", "2048"))
++        except ValueError:
++            raise LLMError("LLM_MAX_TOKENS must be a positive integer") from None
++        if budget <= 0:
++            raise LLMError("LLM_MAX_TOKENS must be a positive integer")
++        return self.chat(SYSTEM, json.dumps(record, default=str), max_tokens=budget)
+ 
+ 
+ class FailedProvider(Provider):
 diff --git a/backend/app/api/read_only.py b/backend/app/api/read_only.py
 --- a/backend/app/api/read_only.py
 +++ b/backend/app/api/read_only.py
-@@ -175,6 +175,8 @@
-     def ui(path: str = ""):
-         if path.startswith(("api/", "ws/")):
-             raise HTTPException(404)
-+        if path in ("", "console", "index.html") and CONSOLE.exists():
-+            return FileResponse(CONSOLE, media_type="text/html")  # new console always wins at /
-         if not USE_DIST or not (UI_DIST / "index.html").exists():
-             if CONSOLE.exists():
-                 return FileResponse(CONSOLE, media_type="text/html")
-diff --git a/backend/app/cli.py b/backend/app/cli.py
---- a/backend/app/cli.py
-+++ b/backend/app/cli.py
-@@ -127,6 +127,8 @@
-         import uvicorn
-         from app.api.read_only import create_app
-         Store(a.db)
-+        print(f"Console: http://127.0.0.1:{a.port}/  (tabs: Training / Live testnet / Debate & indicators)", flush=True)
-+        print("Do not use the old frontend dev server on :5173 - it is the legacy spectator UI.", flush=True)
-         uvicorn.run(create_app(a.db), host="127.0.0.1", port=a.port)
+@@ -84,7 +84,9 @@
+     @app.get("/api/experiments/{eid}/final")
+     def final(eid: str):
+         return {"final": store.artifact(eid, "final", "ranking"), "holdout": store.artifacts(eid, "holdout"),
+-                "narration": store.artifacts(eid, "narration")}
++                "narration": [{"scope": "holdout", "narration": h["narration"]}
++                              for h in store.artifacts(eid, "holdout") if h.get("narration")]
++                             + store.artifacts(eid, "narration")}
  
+     @app.get("/api/experiments/{eid}/training")
+     def training(eid: str):
+diff --git a/backend/app/api/console.html b/backend/app/api/console.html
+--- a/backend/app/api/console.html
++++ b/backend/app/api/console.html
+@@ -72,6 +72,7 @@
+ </nav>
  
-diff --git a/backend/tests/test_console_tabs.py b/backend/tests/test_console_tabs.py
---- a/backend/tests/test_console_tabs.py
-+++ b/backend/tests/test_console_tabs.py
-@@ -33,3 +33,11 @@
-     assert len(d["candles"]) == 149 and d["bar_ts"] == candles[-2][0]
-     assert d["valid"] and d["debate"]["recommendation"] in ("long", "short", "no_trade")
-     assert len(d["series"]["rsi14"]) == 149
+ <main>
++    <section class="card s12"><h2><span class="dot" id="llmDot"></span> LLM narration <span class="note" id="llmInfo"></span></h2><div class="scroll" id="narration"><div class="empty">—</div></div></section>
+   <!-- TRAINING -->
+   <div class="tab grid on" id="tab-training">
+     <section class="card s12">
+@@ -103,13 +104,12 @@
+       <p class="note">Start: <code>python -m app.cli trade --experiment latest --dry-run</code> (no orders) or without <code>--dry-run</code> for testnet.</p>
+     </section>
+     <section class="card s12"><h2>Decisions &amp; orders</h2><div class="scroll" id="liveEvents"><div class="empty">—</div></div></section>
+-    <section class="card s12"><h2><span class="dot" id="llmDot"></span> LLM narration <span class="note" id="llmInfo"></span></h2><div class="scroll" id="narration"><div class="empty">—</div></div></section>
+   </div>
+ 
+   <!-- DEBATE -->
+   <div class="tab grid" id="tab-debate">
+     <section class="card s12">
+-      <h2><span class="dot" id="anDot"></span> Bull vs bear debate · last closed candle <span class="note" id="anNote"></span></h2>
++      <h2><span class="dot" id="anDot"></span> Rule-based bull vs bear · last closed candle <span class="note" id="anNote"></span></h2>
+       <div id="verdict"><div class="empty">Loading…</div></div>
+     </section>
+     <section class="card s6"><div class="side bull" id="bull"></div></section>
+@@ -218,7 +218,7 @@
+   $("verdicts").innerHTML = table([["Fold", "num"], ["Gene"], ["Judge"], ["Status"], ["Why"]],
+     train.verdicts.slice().reverse().map(v => `<tr><td class="num">${v.fold + 1}</td><td class="mono">${esc(v.id)}</td><td>${pill(v.verdict)}</td><td>${pill(v.status)}</td><td class="wrap muted">${esc((v.flags || []).join(", ") || v.rationale || "")}</td></tr>`));
+   drawTraining();
+-  if (!running) refreshFinal();
++  refreshFinal();
+ }
+ function drawTraining() {
+   if (!train || tab !== "training") return;
+@@ -238,9 +238,14 @@
+       rows.map((r, i) => `<tr><td>${i + 1}</td><td class="mono">${esc(r.id)}</td><td>${pill(r.status)}</td><td class="num">${r.fold != null ? r.fold + 1 : ""}</td><td class="num">${r.windows ?? ""}</td><td class="num">${fmt(r.consistency * 100, 0)}%</td><td class="num ${cls(r.rank_net)}">${fmt(r.rank_net)}</td><td class="num ${cls(r.holdout?.net_pnl)}">${fmt(r.holdout?.net_pnl)}</td></tr>`))
+       : `<div class="empty">No ranking yet (it is written when training reaches the final stage).</div>`;
+     const narr = f.narration || [];
+-    $("narration").innerHTML = narr.length ? narr.flatMap(n => (n.narration || n.items || [n]).map(x =>
+-      `<div class="narr ${x.ok === false || x.error ? "bad" : ""}"><div class="muted mono">${esc(n.id || n.scope || "")} ${esc(x.decision_id || "")} · ${esc(n.provider || x.provider || "")}</div>${esc(x.text || x.narration || x.reason || x.error || JSON.stringify(x).slice(0, 400))}</div>`)).join("")
++    const latest = narr.flatMap(n => n.narration || n.items || [n]).at(-1);
++    const label = latest?.error ? "LLM call failed" : latest?.provider?.startsWith("offline") ? "Offline template (not LLM)" : latest?.valid === false ? "Reply has unsupported citations" : latest?.text ? "LLM reply saved" : "No LLM call saved";
++    $("llmDot").className = "dot" + (label === "LLM reply saved" ? " on" : latest?.error ? " err" : "");
++    $("llmInfo").textContent = label + (latest?.provider ? " · " + latest.provider : "");
++    $("narration").innerHTML = narr.length ? narr.slice().reverse().flatMap(n => (n.narration || n.items || [n]).slice().reverse().map(x =>
++      `<div class="narr ${x.valid === false || x.error ? "bad" : ""}"><div class="muted mono">${esc(n.id || n.scope || "")} ${esc(x.decision_id || "")} · ${esc(n.provider || x.provider || "")}</div>${esc(x.text || x.narration || x.reason || x.error || JSON.stringify(x).slice(0, 400))}</div>`)).join("")
+       : `<div class="empty">No narration saved yet. Run <code>python -m app.cli explain --experiment latest</code>.</div>`;
++    if (eid) $("narration").innerHTML += `<div class="muted">Refresh saved explanations: <code>${esc('python -m app.cli explain --experiment "' + eid + '"')}</code></div>`;
+   } catch (e) { $("ranking").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+ }
+ 
+@@ -279,8 +284,8 @@
+   renderPastDebates();
+ }
+ async function refreshLlm() { try { const s = await j("/api/llm");
+-  $("llmDot").className = "dot " + (s.configured || s.ok ? "on" : "err");
+-  $("llmInfo").textContent = [s.configured ? "configured" : "not configured", s.base_url, s.model, s.missing?.length ? "missing " + s.missing.join(", ") : ""].filter(Boolean).join(" · "); } catch {} }
++  $("llmDot").className = "dot " + ("");
++  $("llmInfo").textContent = [s.configured ? "config ready (not proof of a successful call)" : "not configured", s.base_url, s.model, s.missing?.length ? "missing " + s.missing.join(", ") : ""].filter(Boolean).join(" · "); } catch {} }
+ 
+ // ---------- debate & indicators
+ let an = null;
+diff --git a/backend/tests/test_llm_display.py b/backend/tests/test_llm_display.py
+new file mode 100644
+--- /dev/null
++++ b/backend/tests/test_llm_display.py
+@@ -0,0 +1,30 @@
++import json
++from fastapi.testclient import TestClient
++from app.persistence.db import Store
++from app.api.read_only import create_app
++from app.agents.provider import OpenAICompatibleProvider
 +
 +
-+def test_root_serves_new_console(tmp_path):
-+    Store(tmp_path / "c.sqlite")
-+    c = TestClient(create_app(str(tmp_path / "c.sqlite")))
-+    for path in ("/", "/console"):
-+        html = c.get(path).text
-+        assert "Debate &amp; indicators" in html and 'data-tab="training"' in html
++def test_holdout_explanation_readback(tmp_path, cfg):
++    st = Store(tmp_path / "x.sqlite")
++    st.create_experiment("e", "training", cfg.model_dump())
++    c = TestClient(create_app(st.path))
++    assert c.get("/api/experiments/e/final").json()["narration"] == []
++    st.put("e", "holdout", "gene", {"narration": [{"text": "Saved LLM reply", "provider": "openai-compatible:test"}]})
++    data = c.get("/api/experiments/e/final").json()
++    assert data["narration"][0]["narration"][0]["text"] == "Saved LLM reply"
++
++
++def test_reasoning_budget_preserves_json(monkeypatch):
++    seen = []
++    def transport(url, body, headers):
++        seen.append(json.loads(body))
++        return {"choices": [{"message": {"content": "OK"}}]}
++    p = OpenAICompatibleProvider(1, "https://example.invalid/v1", "dummy", "test", transport=transport)
++    record = {"risk": {"reason": "x" * 14000}}
++    assert p.narrate(record) == "OK"
++    assert seen[0]["max_tokens"] == 2048
++    assert json.loads(seen[0]["messages"][1]["content"]) == record
++    monkeypatch.setenv("LLM_MAX_TOKENS", "4096")
++    p.narrate(record)
++    assert seen[1]["max_tokens"] == 4096
