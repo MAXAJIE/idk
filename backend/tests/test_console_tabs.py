@@ -41,3 +41,25 @@ def test_root_serves_new_console(tmp_path):
     for path in ("/", "/console"):
         html = c.get(path).text
         assert "Debate &amp; indicators" in html and 'data-tab="training"' in html
+
+
+def test_training_api_includes_arena_progress_and_results(tmp_path):
+    store = Store(tmp_path / "arena.sqlite")
+    eid = "arena_test"
+    store.create_experiment(eid, "arena:BTCUSDT", {"ga": {"population": 8, "generations": 2}})
+    store.put(eid, "arena", "plan", {"mode": "arena", "auto": True, "max_rounds": 5})
+    store.append(eid, "state", {"to": "ARENA_EVOLUTION", "fold": 0})
+    store.append(eid, "generation", {"fold": 0, "gen": 0, "best": 0.4, "mean": 0.1,
+                                       "valid": 6, "population": 8, "generations": 2,
+                                       "folds": 1, "failed_risk": 1, "best_id": "chr_a",
+                                       "round": 2, "training_mode": "arena"})
+    store.put(eid, "arena", "result", {"champion": {"id": "chr_a"}, "summary": "Champion crowned",
+                                        "total_spawned": 8, "is_survivors": 3, "oos_qualifiers": 1,
+                                        "combatants": []})
+    client = TestClient(create_app(str(tmp_path / "arena.sqlite")))
+    response = client.get(f"/api/experiments/{eid}/training")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["plan"]["mode"] == "arena" and data["plan"]["auto"] is True
+    assert data["generations"][0]["round"] == 2
+    assert data["arena_result"]["champion"]["id"] == "chr_a"

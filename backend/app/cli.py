@@ -127,28 +127,42 @@ def main():
         from app.data import ingest
         from app.learning.arena import train_and_combat, auto_train_until_survivor, analyze_arena_result
         cfg = load_config(backend_path(a.config))
+        cfg = cfg.model_copy(update={"ga": cfg.ga.model_copy(update={"population": a.pop_size, "generations": a.generations})})
         bars, snap = ingest.load(cfg.data)
+        os.makedirs(os.path.dirname(a.db), exist_ok=True)
+        st = Store(a.db)
+        eid = f"arena_{int(time.time() * 1000)}"
+        st.create_experiment(eid, f"arena:{cfg.data.symbol}", cfg.model_dump())
+        st.put(eid, "arena", "plan", {"auto": a.auto, "max_rounds": a.max_rounds if a.auto else 1,
+                                       "population": a.pop_size, "generations": a.generations,
+                                       "mode": "arena"})
+        st.set_state(eid, "RUNNING")
+        st.append(eid, "state", {"to": "ARENA_START", "reason": "Historical arena training started", "fold": 0})
+
+        def emit_training_event(etype, payload):
+            st.append(eid, etype, payload)
+
         print(f"Loaded {len(bars)} bars. Starting arena training (pop={a.pop_size}, gens={a.generations})...")
-        if a.auto:
-            res, rounds = auto_train_until_survivor(
-                bars, cfg, pop_size=a.pop_size, generations=a.generations,
-                min_consistency=a.min_consistency, seed=a.seed, max_rounds=a.max_rounds
-            )
-        else:
-            res = train_and_combat(bars, cfg, pop_size=a.pop_size, generations=a.generations,
-                                   min_consistency=a.min_consistency, seed=a.seed)
-            rounds = 1
-
-        print(analyze_arena_result(res, cfg, round_num=rounds))
-
-        if res.champion:
-            os.makedirs(os.path.dirname(a.db), exist_ok=True)
-            st = Store(a.db)
-            eid = f"arena_{int(time.time())}"
-            st.create_experiment(eid, f"arena:{cfg.data.symbol}", cfg.model_dump())
+        try:
+            if a.auto:
+                res, rounds = auto_train_until_survivor(
+                    bars, cfg, pop_size=a.pop_size, generations=a.generations,
+                    min_consistency=a.min_consistency, seed=a.seed, max_rounds=a.max_rounds,
+                    progress=emit_training_event,
+                )
+            else:
+                res = train_and_combat(bars, cfg, pop_size=a.pop_size, generations=a.generations,
+                                       min_consistency=a.min_consistency, seed=a.seed,
+                                       progress=emit_training_event)
+                rounds = 1
+            print(analyze_arena_result(res, cfg, round_num=rounds))
             st.put(eid, "arena", "result", res.to_dict())
             st.set_state(eid, "COMPLETED")
             print(f"Saved arena results to experiment {eid} in database {a.db}")
+        except Exception as exc:
+            st.append(eid, "state", {"to": "ARENA_FAILED", "reason": f"{type(exc).__name__}: {exc}"})
+            st.set_state(eid, "FAILED")
+            raise
     elif a.cmd == "explain":
         from app.live.runner import resolve_experiment
         from app.agents.narration import explain_experiment

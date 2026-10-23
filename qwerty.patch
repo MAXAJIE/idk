@@ -1,278 +1,275 @@
 --- a/backend/app/cli.py
 +++ b/backend/app/cli.py
-@@ -56,6 +56,8 @@
-     tr.add_argument("--generations", type=int, default=3)
-     tr.add_argument("--min-consistency", type=float, default=0.6)
-     tr.add_argument("--seed", type=int, default=42)
-+    tr.add_argument("--auto", action="store_true", help="Auto-train continuously across adaptive rounds until a qualified champion is found, then stop and analyze")
-+    tr.add_argument("--max-rounds", type=int, default=10, help="Max auto-train rounds when --auto is specified")
-     a = ap.parse_args()
-     if hasattr(a, "db"):
-         a.db = backend_path(a.db)
-@@ -123,23 +125,30 @@
-     elif a.cmd == "train":
-         import time
+@@ -127,28 +127,42 @@
          from app.data import ingest
--        from app.learning.arena import train_and_combat
-+        from app.learning.arena import train_and_combat, auto_train_until_survivor, analyze_arena_result
+         from app.learning.arena import train_and_combat, auto_train_until_survivor, analyze_arena_result
          cfg = load_config(backend_path(a.config))
++        cfg = cfg.model_copy(update={"ga": cfg.ga.model_copy(update={"population": a.pop_size, "generations": a.generations})})
          bars, snap = ingest.load(cfg.data)
--        print(f"Loaded {len(bars)} bars. Starting arena self-training (pop={a.pop_size}, gens={a.generations})...")
--        res = train_and_combat(bars, cfg, pop_size=a.pop_size, generations=a.generations,
--                               min_consistency=a.min_consistency, seed=a.seed)
--        print(f"Arena Result: {res.summary}")
--        print(f"Spawned: {res.total_spawned}, IS Survivors: {res.is_survivors}, OOS Qualifiers: {res.oos_qualifiers}")
-+        print(f"Loaded {len(bars)} bars. Starting arena training (pop={a.pop_size}, gens={a.generations})...")
-+        if a.auto:
-+            res, rounds = auto_train_until_survivor(
-+                bars, cfg, pop_size=a.pop_size, generations=a.generations,
-+                min_consistency=a.min_consistency, seed=a.seed, max_rounds=a.max_rounds
-+            )
-+        else:
-+            res = train_and_combat(bars, cfg, pop_size=a.pop_size, generations=a.generations,
-+                                   min_consistency=a.min_consistency, seed=a.seed)
-+            rounds = 1
++        os.makedirs(os.path.dirname(a.db), exist_ok=True)
++        st = Store(a.db)
++        eid = f"arena_{int(time.time() * 1000)}"
++        st.create_experiment(eid, f"arena:{cfg.data.symbol}", cfg.model_dump())
++        st.put(eid, "arena", "plan", {"auto": a.auto, "max_rounds": a.max_rounds if a.auto else 1,
++                                       "population": a.pop_size, "generations": a.generations,
++                                       "mode": "arena"})
++        st.set_state(eid, "RUNNING")
++        st.append(eid, "state", {"to": "ARENA_START", "reason": "Historical arena training started", "fold": 0})
 +
-+        print(analyze_arena_result(res, cfg, round_num=rounds))
++        def emit_training_event(etype, payload):
++            st.append(eid, etype, payload)
 +
-         if res.champion:
--            print(f"Champion Chromosome ID: {res.champion.id}")
--            print(f"Holdout PnL: {res.champion_oos_pnl:.4f}, WFA Consistency: {res.champion_consistency:.4f}")
-+            os.makedirs(os.path.dirname(a.db), exist_ok=True)
-             st = Store(a.db)
-             eid = f"arena_{int(time.time())}"
-             st.create_experiment(eid, f"arena:{cfg.data.symbol}", cfg.model_dump())
+         print(f"Loaded {len(bars)} bars. Starting arena training (pop={a.pop_size}, gens={a.generations})...")
+-        if a.auto:
+-            res, rounds = auto_train_until_survivor(
+-                bars, cfg, pop_size=a.pop_size, generations=a.generations,
+-                min_consistency=a.min_consistency, seed=a.seed, max_rounds=a.max_rounds
+-            )
+-        else:
+-            res = train_and_combat(bars, cfg, pop_size=a.pop_size, generations=a.generations,
+-                                   min_consistency=a.min_consistency, seed=a.seed)
+-            rounds = 1
+-
+-        print(analyze_arena_result(res, cfg, round_num=rounds))
+-
+-        if res.champion:
+-            os.makedirs(os.path.dirname(a.db), exist_ok=True)
+-            st = Store(a.db)
+-            eid = f"arena_{int(time.time())}"
+-            st.create_experiment(eid, f"arena:{cfg.data.symbol}", cfg.model_dump())
++        try:
++            if a.auto:
++                res, rounds = auto_train_until_survivor(
++                    bars, cfg, pop_size=a.pop_size, generations=a.generations,
++                    min_consistency=a.min_consistency, seed=a.seed, max_rounds=a.max_rounds,
++                    progress=emit_training_event,
++                )
++            else:
++                res = train_and_combat(bars, cfg, pop_size=a.pop_size, generations=a.generations,
++                                       min_consistency=a.min_consistency, seed=a.seed,
++                                       progress=emit_training_event)
++                rounds = 1
++            print(analyze_arena_result(res, cfg, round_num=rounds))
              st.put(eid, "arena", "result", res.to_dict())
              st.set_state(eid, "COMPLETED")
--            print(f"Saved arena results to experiment {eid}")
-+            print(f"Saved arena results to experiment {eid} in database {a.db}")
+             print(f"Saved arena results to experiment {eid} in database {a.db}")
++        except Exception as exc:
++            st.append(eid, "state", {"to": "ARENA_FAILED", "reason": f"{type(exc).__name__}: {exc}"})
++            st.set_state(eid, "FAILED")
++            raise
      elif a.cmd == "explain":
          from app.live.runner import resolve_experiment
          from app.agents.narration import explain_experiment
---- a/backend/app/learning/__init__.py
-+++ b/backend/app/learning/__init__.py
-@@ -1,7 +1,13 @@
- """Continuous learning, reflection memory, online re-evolution, and arena combat."""
- from app.learning.reflection import ReflectionMemory, InhibitionVerdict
- from app.learning.online_evolution import evaluate_rolling_challenger, ChallengerEvaluation
--from app.learning.arena import train_and_combat, ArenaResult, ArenaCombatant
-+from app.learning.arena import (
-+    train_and_combat,
-+    auto_train_until_survivor,
-+    analyze_arena_result,
-+    ArenaResult,
-+    ArenaCombatant,
-+)
- 
- __all__ = [
-     "ReflectionMemory",
-@@ -9,6 +15,8 @@
-     "evaluate_rolling_challenger",
-     "ChallengerEvaluation",
-     "train_and_combat",
-+    "auto_train_until_survivor",
-+    "analyze_arena_result",
-     "ArenaResult",
-     "ArenaCombatant",
- ]
 --- a/backend/app/learning/arena.py
 +++ b/backend/app/learning/arena.py
-@@ -9,6 +9,7 @@
-    - Parameter sensitivity / neighbour retention test (robustness)
-    - Cost-to-reward stress test
- 4. Elite tournament combat (head-to-head out-of-sample comparison).
-+5. Auto-training loop with progressive seed shifts until survivor crowned and analyzed.
- """
- from __future__ import annotations
+@@ -15,7 +15,7 @@
  
-@@ -40,6 +41,10 @@
-     neighbour_retention: float
-     qualified: bool
-     status_reason: str
-+    is_trades: int = 0
-+    is_win_rate: float = 0.0
-+    oos_trades: int = 0
-+    oos_win_rate: float = 0.0
+ import random
+ from dataclasses import asdict, dataclass
+-from typing import Any
++from typing import Any, Callable
  
-     def to_dict(self) -> dict[str, Any]:
-         d = asdict(self)
-@@ -57,6 +62,8 @@
-     champion_oos_pnl: float = 0.0
-     champion_consistency: float = 0.0
-     summary: str = "no champion"
-+    round_number: int = 1
-+    total_rounds: int = 1
+ from app.config import ExperimentConfig
+ from app.data.ingest import Bar
+@@ -89,6 +89,7 @@
+     elite_pool_size: int = 8,
+     min_consistency: float = 0.6,
+     seed: int = 42,
++    progress: Callable[[str, dict[str, Any]], None] | None = None,
+ ) -> ArenaResult:
+     """Mass-produces chromosomes on historical bars and conducts anti-overfitting arena combat."""
+     lookback = pipeline.LOOKBACK
+@@ -111,6 +112,8 @@
+         holdout = (mid, len(bars))
  
-     def to_dict(self) -> dict[str, Any]:
-         return {
-@@ -67,6 +74,8 @@
-             "champion_oos_pnl": round(self.champion_oos_pnl, 4),
-             "champion_consistency": round(self.champion_consistency, 4),
-             "summary": self.summary,
-+            "round_number": self.round_number,
-+            "total_rounds": self.total_rounds,
-             "combatants": [c.to_dict() for c in self.combatants],
-         }
+     rng = random.Random(seed)
++    if progress:
++        progress("state", {"to": "ARENA_EVOLUTION", "reason": "Generating and scoring arena chromosomes", "fold": 0})
  
-@@ -169,15 +178,21 @@
-         retention = robustness.retention(is_pnl, nb_pnls)
+     # 3. Mass generation of candidate chromosomes
+     pop: list[Chromosome] = []
+@@ -124,6 +127,8 @@
+     # 4. Multi-generation evolution across In-Sample folds
+     is_fold = folds[0]
+     for gen in range(generations):
++        import time
++        generation_started = time.time()
+         scored: list[tuple[Chromosome, float]] = []
+         for c in pop:
+             res = simulate(c, ctx, is_fold.is_start, is_fold.is_end)
+@@ -135,6 +140,17 @@
+             scored.append((c, f))
  
-         # Anti-overfitting 4: Risk Gates on Holdout
--        h_gates = gates(h_res["scorecard"], cfg.gates)
--        gates_passed = all(g["passed"] for g in h_gates) and not h_res["failed_risk"]
-+        # Scale min_trades proportionally with holdout window length so shorter holdouts aren't unjustly rejected
-+        is_len = max(1, is_fold.is_end - is_fold.is_start)
-+        holdout_len = max(1, holdout[1] - holdout[0])
-+        scaled_min_trades = max(2, int(round(cfg.gates.min_trades * (holdout_len / is_len))))
-+        h_gates_cfg = cfg.gates.model_copy(update={"min_trades": scaled_min_trades})
-+        h_gates = gates(h_res["scorecard"], h_gates_cfg)
-+        failed_gate_names = [g["gate"] for g in h_gates if not g["passed"]]
-+        gates_passed = len(failed_gate_names) == 0 and not h_res["failed_risk"]
+         scored.sort(key=lambda x: x[1], reverse=True)
++        if progress:
++            fitness_values = [score for _, score in scored]
++            progress("generation", {
++                "fold": 0, "gen": gen, "best": round(fitness_values[0], 4) if fitness_values else 0.0,
++                "mean": round(sum(fitness_values) / len(fitness_values), 4) if fitness_values else 0.0,
++                "worst": round(fitness_values[-1], 4) if fitness_values else 0.0,
++                "valid": len(scored), "population": len(pop), "generations": generations, "folds": 1,
++                "seconds": round(time.time() - generation_started, 3), "failed_risk": sum(c.state == "FAILED_RISK" for c in pop),
++                "best_id": scored[0][0].id if scored else "",
++                "training_mode": "arena",
++            })
+         if gen < generations - 1:
+             pop, _ = population.next_generation(rng, scored, [], pop_size, gen + 1, cfg.ga)
+             total_spawned += len(pop)
+@@ -144,10 +160,15 @@
+             elite_combatants = population.select_diverse_elite(scored, k=elite_pool_size)
  
-         qualified = True
-         reason = "QUALIFIED"
+     if not elite_combatants:
++        if progress:
++            progress("state", {"to": "ARENA_COMPLETED", "reason": "No candidates survived IS evolution", "fold": 0})
+         return ArenaResult(champion=None, total_spawned=total_spawned, is_survivors=0,
+                            oos_qualifiers=0, combatants=[], summary="no candidates survived IS evolution")
  
-         if not gates_passed:
-             qualified = False
--            reason = "failed risk gates on holdout"
-+            reason = f"failed risk gates on holdout: {', '.join(failed_gate_names) if failed_gate_names else 'failed_risk'}"
-         elif consistency < min_consistency:
-             qualified = False
-             reason = f"low WFA consistency ({consistency:.2f} < {min_consistency:.2f})"
-@@ -198,6 +213,10 @@
-             neighbour_retention=round(retention, 4),
-             qualified=qualified,
-             status_reason=reason,
-+            is_trades=is_res["scorecard"]["n_trades"],
-+            is_win_rate=round(is_res["scorecard"]["win_rate"] or 0.0, 4),
-+            oos_trades=h_res["scorecard"]["n_trades"],
-+            oos_win_rate=round(h_res["scorecard"]["win_rate"] or 0.0, 4),
+     is_survivors = len(elite_combatants)
++
++    if progress:
++        progress("state", {"to": "ARENA_COMBAT", "reason": "Testing IS survivors against WFA and holdout gates", "fold": 0})
+ 
+     # 5. Combat Arena: test elites against multiple Out-Of-Sample folds & Holdout
+     combatant_records: list[ArenaCombatant] = []
+@@ -234,6 +255,8 @@
+         champ_rec = next(r for r in combatant_records if r.chromosome.id == champion.id)
+         summary = (f"Champion {champion.id} crowned: holdout PnL={champ_pnl:.2f}, "
+                    f"WFA consistency={champ_rec.consistency:.2f}, retention={champ_rec.neighbour_retention:.2f}")
++        if progress:
++            progress("state", {"to": "ARENA_COMPLETED", "reason": summary, "fold": 0})
+         return ArenaResult(
+             champion=champion,
+             total_spawned=total_spawned,
+@@ -246,6 +269,8 @@
          )
-         combatant_records.append(record)
  
-@@ -235,3 +254,112 @@
-         combatants=combatant_records,
-         summary=summary,
-     )
-+
-+
-+def auto_train_until_survivor(
-+    bars: list[Bar],
-+    cfg: ExperimentConfig,
-+    base_population: list[Chromosome] | None = None,
-+    pop_size: int = 36,
-+    generations: int = 3,
-+    elite_pool_size: int = 8,
-+    min_consistency: float = 0.6,
-+    seed: int = 42,
-+    max_rounds: int = 10,
-+) -> tuple[ArenaResult, int]:
-+    """Repeatedly conducts arena combat with progressive seed shifts and elite carry-over
-+    until at least one champion satisfies strict anti-overfitting gates, or max_rounds is reached."""
-+    current_seed = seed
-+    carried_pool: list[Chromosome] = list(base_population) if base_population else []
-+    last_res: ArenaResult | None = None
-+
-+    for round_idx in range(1, max_rounds + 1):
-+        print(f"\n--- [Auto-Train Round {round_idx}/{max_rounds}] seed={current_seed} pop={pop_size} gens={generations} ---", flush=True)
-+        res = train_and_combat(
-+            bars=bars,
-+            cfg=cfg,
-+            base_population=carried_pool if carried_pool else None,
-+            pop_size=pop_size,
-+            generations=generations,
-+            elite_pool_size=elite_pool_size,
-+            min_consistency=min_consistency,
-+            seed=current_seed,
-+        )
-+        res.round_number = round_idx
-+        res.total_rounds = round_idx
-+        last_res = res
-+
-+        print(f"Round {round_idx} result: {res.summary} (Spawned: {res.total_spawned}, IS Survivors: {res.is_survivors}, OOS Qualifiers: {res.oos_qualifiers})", flush=True)
-+
-+        if res.champion is not None:
-+            print(f">>> Survivor found in round {round_idx}! Halting auto-training for analysis.", flush=True)
-+            return res, round_idx
-+
-+        # If no champion, carry top IS performers to next round with new seed mutations
-+        if res.combatants:
-+            carried_pool = [c.chromosome for c in res.combatants[:4]]
-+        current_seed = (current_seed * 1103515245 + 12345) & 0x7FFFFFFF
-+
-+    if last_res is not None:
-+        last_res.total_rounds = max_rounds
-+        return last_res, max_rounds
-+    return ArenaResult(champion=None, total_spawned=0, is_survivors=0, oos_qualifiers=0, combatants=[]), max_rounds
-+
-+
-+def analyze_arena_result(res: ArenaResult, cfg: ExperimentConfig, round_num: int = 1) -> str:
-+    """Produces a structured, comprehensive analysis report of arena combat outcomes."""
-+    lines = [
-+        "=" * 64,
-+        "          ARENA COMBAT & ANTI-OVERFITTING ANALYSIS REPORT        ",
-+        "=" * 64,
-+        f"Status:            {'CHAMPION QUALIFIED' if res.champion else 'NO QUALIFIED SURVIVOR'}",
-+        f"Total Evaluated:   {res.total_spawned} chromosomes across {res.total_rounds} round(s)",
-+        f"IS Survivors:      {res.is_survivors} reached tournament combat",
-+        f"OOS Qualifiers:    {res.oos_qualifiers} satisfied all anti-overfitting gates",
-+    ]
-+
-+    if not res.champion:
-+        lines.extend([
-+            "-" * 64,
-+            "Failure Analysis / Gate Blockers:",
-+        ])
-+        for idx, c in enumerate(res.combatants[:6]):
-+            lines.append(f"  Candidate {idx+1} ({c.chromosome.id}): {c.status_reason}")
-+            lines.append(f"    IS PnL: {c.is_pnl:.2f} | OOS PnL: {c.oos_pnl:.2f} | Consistency: {c.consistency:.2f} | Retention: {c.neighbour_retention:.2f}")
-+        lines.extend([
-+            "-" * 64,
-+            "Recommendation: Run with `--auto --max-rounds 10` or adjust `--min-consistency 0.5`.",
-+            "=" * 64,
-+        ])
-+        return "\n".join(lines)
-+
-+    champ = res.champion
-+    champ_rec = next((r for r in res.combatants if r.chromosome.id == champ.id), res.combatants[0])
-+    g = champ.genes
-+
-+    lines.extend([
-+        "-" * 64,
-+        f"[1] Champion Chromosome: {champ.id} (Gen {champ.generation})",
-+        f"  - Strategy Topology: {g.get('topology', {}).get('entry_mode', 'trend_follow')} (compose={g.get('topology', {}).get('compose', 'all')})",
-+        f"  - Stop Loss:         {g.get('stop_target', {}).get('stop_method', 'atr').upper()} (ATR x {g.get('stop_target', {}).get('stop_atr', 'N/A')})",
-+        f"  - Take Profit:       {g.get('stop_target', {}).get('target_method', 'rr').upper()} (Risk/Reward {g.get('stop_target', {}).get('rr', 'N/A')}:1)",
-+        f"  - Max Holding Bars:  {g.get('stop_target', {}).get('max_hold_bars', 'N/A')} bars",
-+        f"  - Trend Filter:      EMA {g.get('trend', {}).get('ema_fast', 'N/A')}/{g.get('trend', {}).get('ema_slow', 'N/A')} (RSI guard: {g.get('trend', {}).get('rsi_guard', 'N/A')})",
-+        f"  - Risk Sizing:       Risk {g.get('sizing', {}).get('risk_frac', 0.01)*100:.2f}% equity per trade",
-+        "-" * 64,
-+        "[2] Performance Scorecard (IS Train vs OOS Holdout)",
-+        f"  - In-Sample (IS):    Net PnL: ${champ_rec.is_pnl:,.2f} | Max DD: {champ_rec.is_drawdown*100:.2f}% | Trades: {champ_rec.is_trades} | Win Rate: {champ_rec.is_win_rate*100:.1f}%",
-+        f"  - Holdout (OOS):     Net PnL: ${champ_rec.oos_pnl:,.2f} | Max DD: {champ_rec.oos_drawdown*100:.2f}% | Trades: {champ_rec.oos_trades} | Win Rate: {champ_rec.oos_win_rate*100:.1f}%",
-+        "-" * 64,
-+        "[3] Anti-Overfitting Verification",
-+        f"  - WFA Multi-Window Consistency:      {champ_rec.consistency*100:.1f}% (Required: >={res.champion_consistency*100:.1f}%) -> PASSED",
-+        f"  - Parameter Neighbourhood Retention: {champ_rec.neighbour_retention:.2f} (Required: >=0.20) -> PASSED",
-+        "    (Confirms strategy sits on a wide parameter plateau rather than a fragile overfitted curve-fit spike)",
-+        f"  - Holdout Hard Risk Gates:           PASSED (Drawdown, Stop Compliance, Cost Share, Realized Return)",
-+        "-" * 64,
-+        "[4] Deployment Readiness",
-+        "  - Verdict:           APPROVED for Testnet Dry-Run / Paper execution.",
-+        "  - Next Step Command: python -m app.cli trade --config configs/binance.json --experiment <exp_id> --dry-run",
-+        "=" * 64,
-+    ])
-+    return "\n".join(lines)
+     summary = f"Combat completed with {is_survivors} IS survivors, but none satisfied strict anti-overfitting gates."
++    if progress:
++        progress("state", {"to": "ARENA_COMPLETED", "reason": summary, "fold": 0})
+     return ArenaResult(
+         champion=None,
+         total_spawned=total_spawned,
+@@ -266,6 +291,7 @@
+     min_consistency: float = 0.6,
+     seed: int = 42,
+     max_rounds: int = 10,
++    progress: Callable[[str, dict[str, Any]], None] | None = None,
+ ) -> tuple[ArenaResult, int]:
+     """Repeatedly conducts arena combat with progressive seed shifts and elite carry-over
+     until at least one champion satisfies strict anti-overfitting gates, or max_rounds is reached."""
+@@ -284,6 +310,7 @@
+             elite_pool_size=elite_pool_size,
+             min_consistency=min_consistency,
+             seed=current_seed,
++            progress=(lambda etype, payload: progress(etype, payload | {"round": round_idx}) if progress else None),
+         )
+         res.round_number = round_idx
+         res.total_rounds = round_idx
+--- a/backend/app/api/read_only.py
++++ b/backend/app/api/read_only.py
+@@ -106,8 +106,14 @@
+                 elif r["type"] == "judge_verdict":
+                     verdicts.append(r["payload"])
+         cfg = e["config"].get("ga", {})
++        arena_plan = store.artifact(eid, "arena", "plan") or {}
++        arena_result = store.artifact(eid, "arena", "result")
++        if arena_result and "mode" not in arena_plan:
++            arena_plan["mode"] = "arena"
+         return {"id": eid, "state": e["state"], "generations": gens, "states": states, "verdicts": verdicts,
+-                "plan": {"generations": cfg.get("generations"), "population": cfg.get("population")}}
++                "arena_result": arena_result,
++                "plan": {"generations": cfg.get("generations"), "population": cfg.get("population"),
++                         **arena_plan}}
+ 
+     LIVE_TYPES = {"live_started", "decision", "order", "position", "position_closed", "flatten", "halted",
+                   "defer", "exchange_error", "protective_order_failed"}
+--- a/backend/app/api/console.html
++++ b/backend/app/api/console.html
+@@ -88,6 +88,7 @@
+     <section class="card s4"><h2>Pipeline stages</h2><div class="scroll" id="stages"><div class="empty">—</div></div></section>
+     <section class="card s6"><h2>Generations</h2><div class="scroll" id="gens"><div class="empty">—</div></div></section>
+     <section class="card s6"><h2>Judge verdicts (out-of-sample)</h2><div class="scroll" id="verdicts"><div class="empty">—</div></div></section>
++    <section class="card s12"><h2>Arena combat results</h2><div class="scroll" id="arenaResults"><div class="empty">Arena results appear here after the arena run completes.</div></div></section>
+     <section class="card s12"><h2>Final ranking</h2><div class="scroll" id="ranking"><div class="empty">—</div></div></section>
+   </div>
+ 
+@@ -180,7 +181,9 @@
+ async function loadExperiments() {
+   try { const xs = await j("/api/experiments"); const sel = $("exp"), cur = sel.value;
+     sel.innerHTML = xs.length ? xs.map(e => `<option value="${esc(e.id)}">${esc(e.name || e.id)} · ${esc(e.state)} · ${new Date(e.created * 1000).toLocaleString()}</option>`).join("") : `<option value="">(none yet)</option>`;
+-    if (cur && xs.some(e => e.id === cur)) sel.value = cur;
++    const activeArena = xs.find(e => e.state === "RUNNING" && (e.name || "").startsWith("arena:"));
++    if (activeArena) sel.value = activeArena.id;
++    else if (cur && xs.some(e => e.id === cur)) sel.value = cur;
+     const nxt = sel.value || null; if (nxt !== eid) { eid = nxt; refreshExperiment(); }
+   } catch (e) { $("exp").innerHTML = `<option>API error</option>`; }
+ }
+@@ -195,13 +198,14 @@
+   const g = train.generations, last = g[g.length - 1], st = train.state;
+   const running = !/COMPLETED|ABORTED|FAILED/.test(st);
+   const per = last?.generations || train.plan.generations || 0, folds = last?.folds || 1;
+-  const done = g.length, total = per * folds;
+-  $("trBar").style.width = total ? Math.min(100, done / total * 100).toFixed(1) + "%" : "0";
++  const rounds = train.plan.max_rounds || 1;
++  const done = g.length, total = per * folds * rounds;
++  $("trBar").style.width = !running ? "100%" : total ? Math.min(100, done / total * 100).toFixed(1) + "%" : "0";
+   $("trNote").textContent = running ? "live · refreshes every 2s" : "finished";
+   const best = g.length ? Math.max(...g.map(x => x.best)) : null;
+   $("trStats").innerHTML = [
+     stat("State", pill(st), "", true),
+-    stat("Fold", last ? `${last.fold + 1} / ${folds}` : "—", "", true),
++    stat(train.plan.mode === "arena" ? "Round / Fold" : "Fold", last ? `${last.round || 1} / ${rounds} · ${last.fold + 1} / ${folds}` : "—", "", true),
+     stat("Generation", last ? `${last.gen + 1} / ${per}` : "—", "", true),
+     stat("Progress", total ? `${done} / ${total}` : "—", "", true),
+     stat("Best fitness (now)", fmt(last?.best, 4), cls(last?.best)),
+@@ -213,17 +217,25 @@
+   ].join("");
+   $("stages").innerHTML = table([["Stage"], ["Fold", "num"], ["When"]], train.states.slice().reverse().map(s =>
+     `<tr><td>${pill(s.to)}${s.reason ? ` <span class="muted">${esc(s.reason)}</span>` : ""}</td><td class="num">${s.fold != null ? s.fold + 1 : ""}</td><td class="muted">${ago(s.ts)}</td></tr>`));
+-  $("gens").innerHTML = table([["Fold", "num"], ["Gen", "num"], ["Best", "num"], ["Mean", "num"], ["Valid", "num"], ["Failed", "num"], ["Best gene"]],
+-    g.slice().reverse().map(x => `<tr><td class="num">${x.fold + 1}</td><td class="num">${x.gen + 1}</td><td class="num ${cls(x.best)}">${fmt(x.best, 4)}</td><td class="num ${cls(x.mean)}">${fmt(x.mean, 4)}</td><td class="num">${x.valid ?? "—"}/${x.population ?? "—"}</td><td class="num">${x.failed_risk}</td><td class="mono muted">${esc(x.best_id)}</td></tr>`));
++  $("gens").innerHTML = table([["Round", "num"], ["Fold", "num"], ["Gen", "num"], ["Best", "num"], ["Mean", "num"], ["Valid", "num"], ["Failed", "num"], ["Best gene"]],
++    g.slice().reverse().map(x => `<tr><td class="num">${x.round || 1}</td><td class="num">${x.fold + 1}</td><td class="num">${x.gen + 1}</td><td class="num ${cls(x.best)}">${fmt(x.best, 4)}</td><td class="num ${cls(x.mean)}">${fmt(x.mean, 4)}</td><td class="num">${x.valid ?? "—"}/${x.population ?? "—"}</td><td class="num">${x.failed_risk}</td><td class="mono muted">${esc(x.best_id)}</td></tr>`));
+   $("verdicts").innerHTML = table([["Fold", "num"], ["Gene"], ["Judge"], ["Status"], ["Why"]],
+     train.verdicts.slice().reverse().map(v => `<tr><td class="num">${v.fold + 1}</td><td class="mono">${esc(v.id)}</td><td>${pill(v.verdict)}</td><td>${pill(v.status)}</td><td class="wrap muted">${esc((v.flags || []).join(", ") || v.rationale || "")}</td></tr>`));
++  const ar = train.arena_result;
++  if (ar) {
++    const combatants = (ar.combatants || []).slice().sort((a, b) => Number(b.qualified) - Number(a.qualified) || b.oos_pnl - a.oos_pnl);
++    $("arenaResults").innerHTML = `<p>${ar.champion ? `<b class="up">Champion: ${esc(ar.champion.id)}</b>` : `<b class="warn">No qualified survivor</b>`} · ${esc(ar.summary || "")} · spawned ${ar.total_spawned ?? "—"} · IS survivors ${ar.is_survivors ?? "—"} · OOS qualifiers ${ar.oos_qualifiers ?? "—"}</p>` +
++      table([["Gene"], ["Result"], ["IS PnL", "num"], ["OOS PnL", "num"], ["WFA", "num"], ["Retention", "num"], ["Gate notes"]], combatants.map(c => `<tr><td class="mono">${esc(c.chromosome?.id || "—")}</td><td>${c.qualified ? pill("QUALIFIED") : pill("REJECTED")}</td><td class="num">${fmt(c.is_pnl)}</td><td class="num ${cls(c.oos_pnl)}">${fmt(c.oos_pnl)}</td><td class="num">${fmt((c.consistency || 0) * 100, 1)}%</td><td class="num">${fmt(c.neighbour_retention, 2)}</td><td class="wrap muted">${esc(c.status_reason || "")}</td></tr>`));
++  } else {
++    $("arenaResults").innerHTML = `<div class="empty">${train.plan.mode === "arena" ? (running ? "Arena is training; candidate results will appear after combat." : "Arena result was not saved.") : "This experiment is not an arena training run."}</div>`;
++  }
+   drawTraining();
+   refreshFinal();
+ }
+ function drawTraining() {
+   if (!train || tab !== "training") return;
+   const g = train.generations, marks = [];
+-  g.forEach((x, i) => { if (x.gen === 0) marks.push({i, label: "fold " + (x.fold + 1)}); });
++  g.forEach((x, i) => { if (x.gen === 0) marks.push({i, label: (train.plan.auto ? "round " + (x.round || 1) + " · " : "") + "fold " + (x.fold + 1)}); });
+   lineChart($("fitChart"), [
+     {data: g.map(x => x.best), color: css("--up"), width: 2},
+     {data: g.map(x => x.mean), color: css("--accent")},
+@@ -236,7 +248,7 @@
+     const rows = f.final?.rows || f.final?.ranking || f.final || [];
+     $("ranking").innerHTML = Array.isArray(rows) && rows.length ? table([["#"], ["Gene"], ["Status"], ["Fold", "num"], ["Windows", "num"], ["Consistency", "num"], ["Adj. net", "num"], ["Holdout net", "num"]],
+       rows.map((r, i) => `<tr><td>${i + 1}</td><td class="mono">${esc(r.id)}</td><td>${pill(r.status)}</td><td class="num">${r.fold != null ? r.fold + 1 : ""}</td><td class="num">${r.windows ?? ""}</td><td class="num">${fmt(r.consistency * 100, 0)}%</td><td class="num ${cls(r.rank_net)}">${fmt(r.rank_net)}</td><td class="num ${cls(r.holdout?.net_pnl)}">${fmt(r.holdout?.net_pnl)}</td></tr>`))
+-      : `<div class="empty">No ranking yet (it is written when training reaches the final stage).</div>`;
++      : `<div class="empty">${train?.plan?.mode === "arena" ? "Arena combat results are shown above; this experiment has no standard WFA ranking." : "No ranking yet (it is written when training reaches the final stage)."}</div>`;
+     const narr = f.narration || [];
+     const latest = narr.flatMap(n => n.narration || n.items || [n]).at(-1);
+     const label = latest?.error ? "LLM call failed" : latest?.provider?.startsWith("offline") ? "Offline template (not LLM)" : latest?.valid === false ? "Reply has unsupported citations" : latest?.text ? "LLM reply saved" : "No LLM call saved";
 --- a/backend/tests/test_continuous_learning.py
 +++ b/backend/tests/test_continuous_learning.py
-@@ -121,3 +121,24 @@
-         assert hasattr(c, "consistency")
-         assert hasattr(c, "neighbour_retention")
-         assert hasattr(c, "qualified")
+@@ -142,3 +142,24 @@
+     report = analyze_arena_result(res, cfg, round_num=rounds)
+     assert "ARENA COMBAT & ANTI-OVERFITTING ANALYSIS REPORT" in report
+     assert "Status:" in report
 +
 +
-+def test_auto_train_until_survivor_and_analysis_reporting():
-+    from app.learning.arena import auto_train_until_survivor, analyze_arena_result
++def test_arena_emits_generation_progress_events():
++    from app.learning.arena import train_and_combat
 +    cfg = load_config(Path(__file__).parents[1] / "configs/default.json")
 +    bars = []
 +    price = 100.0
@@ -280,13 +277,41 @@
 +        price += 0.4 if i % 3 != 0 else -0.5
 +        bars.append(Bar(i=i, ts=1000 + i * 60, open=price - 0.2, high=price + 0.8,
 +                        low=price - 0.8, close=price, volume=1500.0, funding_rate=0.0001))
++    events = []
++    train_and_combat(bars, cfg, pop_size=6, generations=2, elite_pool_size=3,
++                     min_consistency=0.5, seed=2026,
++                     progress=lambda event_type, payload: events.append((event_type, payload)))
++    generations = [payload for event_type, payload in events if event_type == "generation"]
++    assert len(generations) == 2
++    assert [g["gen"] for g in generations] == [0, 1]
++    assert all(g["training_mode"] == "arena" for g in generations)
++    assert all(g["population"] == 6 for g in generations)
++    assert any(payload.get("to") == "ARENA_COMBAT" for event_type, payload in events if event_type == "state")
+--- a/backend/tests/test_console_tabs.py
++++ b/backend/tests/test_console_tabs.py
+@@ -41,3 +41,25 @@
+     for path in ("/", "/console"):
+         html = c.get(path).text
+         assert "Debate &amp; indicators" in html and 'data-tab="training"' in html
 +
-+    res, rounds = auto_train_until_survivor(
-+        bars, cfg, pop_size=6, generations=2, elite_pool_size=3,
-+        min_consistency=0.5, seed=42, max_rounds=2
-+    )
-+    assert rounds >= 1
-+    assert res.total_spawned >= 6
-+    report = analyze_arena_result(res, cfg, round_num=rounds)
-+    assert "ARENA COMBAT & ANTI-OVERFITTING ANALYSIS REPORT" in report
-+    assert "Status:" in report
++
++def test_training_api_includes_arena_progress_and_results(tmp_path):
++    store = Store(tmp_path / "arena.sqlite")
++    eid = "arena_test"
++    store.create_experiment(eid, "arena:BTCUSDT", {"ga": {"population": 8, "generations": 2}})
++    store.put(eid, "arena", "plan", {"mode": "arena", "auto": True, "max_rounds": 5})
++    store.append(eid, "state", {"to": "ARENA_EVOLUTION", "fold": 0})
++    store.append(eid, "generation", {"fold": 0, "gen": 0, "best": 0.4, "mean": 0.1,
++                                       "valid": 6, "population": 8, "generations": 2,
++                                       "folds": 1, "failed_risk": 1, "best_id": "chr_a",
++                                       "round": 2, "training_mode": "arena"})
++    store.put(eid, "arena", "result", {"champion": {"id": "chr_a"}, "summary": "Champion crowned",
++                                        "total_spawned": 8, "is_survivors": 3, "oos_qualifiers": 1,
++                                        "combatants": []})
++    client = TestClient(create_app(str(tmp_path / "arena.sqlite")))
++    response = client.get(f"/api/experiments/{eid}/training")
++    assert response.status_code == 200
++    data = response.json()
++    assert data["plan"]["mode"] == "arena" and data["plan"]["auto"] is True
++    assert data["generations"][0]["round"] == 2
++    assert data["arena_result"]["champion"]["id"] == "chr_a"

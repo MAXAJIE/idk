@@ -88,6 +88,7 @@
     <section class="card s4"><h2>Pipeline stages</h2><div class="scroll" id="stages"><div class="empty">—</div></div></section>
     <section class="card s6"><h2>Generations</h2><div class="scroll" id="gens"><div class="empty">—</div></div></section>
     <section class="card s6"><h2>Judge verdicts (out-of-sample)</h2><div class="scroll" id="verdicts"><div class="empty">—</div></div></section>
+    <section class="card s12"><h2>Arena combat results</h2><div class="scroll" id="arenaResults"><div class="empty">Arena results appear here after the arena run completes.</div></div></section>
     <section class="card s12"><h2>Final ranking</h2><div class="scroll" id="ranking"><div class="empty">—</div></div></section>
   </div>
 
@@ -180,7 +181,9 @@ let eid = null;
 async function loadExperiments() {
   try { const xs = await j("/api/experiments"); const sel = $("exp"), cur = sel.value;
     sel.innerHTML = xs.length ? xs.map(e => `<option value="${esc(e.id)}">${esc(e.name || e.id)} · ${esc(e.state)} · ${new Date(e.created * 1000).toLocaleString()}</option>`).join("") : `<option value="">(none yet)</option>`;
-    if (cur && xs.some(e => e.id === cur)) sel.value = cur;
+    const activeArena = xs.find(e => e.state === "RUNNING" && (e.name || "").startsWith("arena:"));
+    if (activeArena) sel.value = activeArena.id;
+    else if (cur && xs.some(e => e.id === cur)) sel.value = cur;
     const nxt = sel.value || null; if (nxt !== eid) { eid = nxt; refreshExperiment(); }
   } catch (e) { $("exp").innerHTML = `<option>API error</option>`; }
 }
@@ -195,13 +198,14 @@ async function refreshTraining() {
   const g = train.generations, last = g[g.length - 1], st = train.state;
   const running = !/COMPLETED|ABORTED|FAILED/.test(st);
   const per = last?.generations || train.plan.generations || 0, folds = last?.folds || 1;
-  const done = g.length, total = per * folds;
-  $("trBar").style.width = total ? Math.min(100, done / total * 100).toFixed(1) + "%" : "0";
+  const rounds = train.plan.max_rounds || 1;
+  const done = g.length, total = per * folds * rounds;
+  $("trBar").style.width = !running ? "100%" : total ? Math.min(100, done / total * 100).toFixed(1) + "%" : "0";
   $("trNote").textContent = running ? "live · refreshes every 2s" : "finished";
   const best = g.length ? Math.max(...g.map(x => x.best)) : null;
   $("trStats").innerHTML = [
     stat("State", pill(st), "", true),
-    stat("Fold", last ? `${last.fold + 1} / ${folds}` : "—", "", true),
+    stat(train.plan.mode === "arena" ? "Round / Fold" : "Fold", last ? `${last.round || 1} / ${rounds} · ${last.fold + 1} / ${folds}` : "—", "", true),
     stat("Generation", last ? `${last.gen + 1} / ${per}` : "—", "", true),
     stat("Progress", total ? `${done} / ${total}` : "—", "", true),
     stat("Best fitness (now)", fmt(last?.best, 4), cls(last?.best)),
@@ -213,17 +217,25 @@ async function refreshTraining() {
   ].join("");
   $("stages").innerHTML = table([["Stage"], ["Fold", "num"], ["When"]], train.states.slice().reverse().map(s =>
     `<tr><td>${pill(s.to)}${s.reason ? ` <span class="muted">${esc(s.reason)}</span>` : ""}</td><td class="num">${s.fold != null ? s.fold + 1 : ""}</td><td class="muted">${ago(s.ts)}</td></tr>`));
-  $("gens").innerHTML = table([["Fold", "num"], ["Gen", "num"], ["Best", "num"], ["Mean", "num"], ["Valid", "num"], ["Failed", "num"], ["Best gene"]],
-    g.slice().reverse().map(x => `<tr><td class="num">${x.fold + 1}</td><td class="num">${x.gen + 1}</td><td class="num ${cls(x.best)}">${fmt(x.best, 4)}</td><td class="num ${cls(x.mean)}">${fmt(x.mean, 4)}</td><td class="num">${x.valid ?? "—"}/${x.population ?? "—"}</td><td class="num">${x.failed_risk}</td><td class="mono muted">${esc(x.best_id)}</td></tr>`));
+  $("gens").innerHTML = table([["Round", "num"], ["Fold", "num"], ["Gen", "num"], ["Best", "num"], ["Mean", "num"], ["Valid", "num"], ["Failed", "num"], ["Best gene"]],
+    g.slice().reverse().map(x => `<tr><td class="num">${x.round || 1}</td><td class="num">${x.fold + 1}</td><td class="num">${x.gen + 1}</td><td class="num ${cls(x.best)}">${fmt(x.best, 4)}</td><td class="num ${cls(x.mean)}">${fmt(x.mean, 4)}</td><td class="num">${x.valid ?? "—"}/${x.population ?? "—"}</td><td class="num">${x.failed_risk}</td><td class="mono muted">${esc(x.best_id)}</td></tr>`));
   $("verdicts").innerHTML = table([["Fold", "num"], ["Gene"], ["Judge"], ["Status"], ["Why"]],
     train.verdicts.slice().reverse().map(v => `<tr><td class="num">${v.fold + 1}</td><td class="mono">${esc(v.id)}</td><td>${pill(v.verdict)}</td><td>${pill(v.status)}</td><td class="wrap muted">${esc((v.flags || []).join(", ") || v.rationale || "")}</td></tr>`));
+  const ar = train.arena_result;
+  if (ar) {
+    const combatants = (ar.combatants || []).slice().sort((a, b) => Number(b.qualified) - Number(a.qualified) || b.oos_pnl - a.oos_pnl);
+    $("arenaResults").innerHTML = `<p>${ar.champion ? `<b class="up">Champion: ${esc(ar.champion.id)}</b>` : `<b class="warn">No qualified survivor</b>`} · ${esc(ar.summary || "")} · spawned ${ar.total_spawned ?? "—"} · IS survivors ${ar.is_survivors ?? "—"} · OOS qualifiers ${ar.oos_qualifiers ?? "—"}</p>` +
+      table([["Gene"], ["Result"], ["IS PnL", "num"], ["OOS PnL", "num"], ["WFA", "num"], ["Retention", "num"], ["Gate notes"]], combatants.map(c => `<tr><td class="mono">${esc(c.chromosome?.id || "—")}</td><td>${c.qualified ? pill("QUALIFIED") : pill("REJECTED")}</td><td class="num">${fmt(c.is_pnl)}</td><td class="num ${cls(c.oos_pnl)}">${fmt(c.oos_pnl)}</td><td class="num">${fmt((c.consistency || 0) * 100, 1)}%</td><td class="num">${fmt(c.neighbour_retention, 2)}</td><td class="wrap muted">${esc(c.status_reason || "")}</td></tr>`));
+  } else {
+    $("arenaResults").innerHTML = `<div class="empty">${train.plan.mode === "arena" ? (running ? "Arena is training; candidate results will appear after combat." : "Arena result was not saved.") : "This experiment is not an arena training run."}</div>`;
+  }
   drawTraining();
   refreshFinal();
 }
 function drawTraining() {
   if (!train || tab !== "training") return;
   const g = train.generations, marks = [];
-  g.forEach((x, i) => { if (x.gen === 0) marks.push({i, label: "fold " + (x.fold + 1)}); });
+  g.forEach((x, i) => { if (x.gen === 0) marks.push({i, label: (train.plan.auto ? "round " + (x.round || 1) + " · " : "") + "fold " + (x.fold + 1)}); });
   lineChart($("fitChart"), [
     {data: g.map(x => x.best), color: css("--up"), width: 2},
     {data: g.map(x => x.mean), color: css("--accent")},
@@ -236,7 +248,7 @@ async function refreshFinal() {
     const rows = f.final?.rows || f.final?.ranking || f.final || [];
     $("ranking").innerHTML = Array.isArray(rows) && rows.length ? table([["#"], ["Gene"], ["Status"], ["Fold", "num"], ["Windows", "num"], ["Consistency", "num"], ["Adj. net", "num"], ["Holdout net", "num"]],
       rows.map((r, i) => `<tr><td>${i + 1}</td><td class="mono">${esc(r.id)}</td><td>${pill(r.status)}</td><td class="num">${r.fold != null ? r.fold + 1 : ""}</td><td class="num">${r.windows ?? ""}</td><td class="num">${fmt(r.consistency * 100, 0)}%</td><td class="num ${cls(r.rank_net)}">${fmt(r.rank_net)}</td><td class="num ${cls(r.holdout?.net_pnl)}">${fmt(r.holdout?.net_pnl)}</td></tr>`))
-      : `<div class="empty">No ranking yet (it is written when training reaches the final stage).</div>`;
+      : `<div class="empty">${train?.plan?.mode === "arena" ? "Arena combat results are shown above; this experiment has no standard WFA ranking." : "No ranking yet (it is written when training reaches the final stage)."}</div>`;
     const narr = f.narration || [];
     const latest = narr.flatMap(n => n.narration || n.items || [n]).at(-1);
     const label = latest?.error ? "LLM call failed" : latest?.provider?.startsWith("offline") ? "Offline template (not LLM)" : latest?.valid === false ? "Reply has unsupported citations" : latest?.text ? "LLM reply saved" : "No LLM call saved";

@@ -106,8 +106,14 @@ def create_app(db_path: str = DB) -> FastAPI:
                 elif r["type"] == "judge_verdict":
                     verdicts.append(r["payload"])
         cfg = e["config"].get("ga", {})
+        arena_plan = store.artifact(eid, "arena", "plan") or {}
+        arena_result = store.artifact(eid, "arena", "result")
+        if arena_result and "mode" not in arena_plan:
+            arena_plan["mode"] = "arena"
         return {"id": eid, "state": e["state"], "generations": gens, "states": states, "verdicts": verdicts,
-                "plan": {"generations": cfg.get("generations"), "population": cfg.get("population")}}
+                "arena_result": arena_result,
+                "plan": {"generations": cfg.get("generations"), "population": cfg.get("population"),
+                         **arena_plan}}
 
     LIVE_TYPES = {"live_started", "decision", "order", "position", "position_closed", "flatten", "halted",
                   "defer", "exchange_error", "protective_order_failed"}

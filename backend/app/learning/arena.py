@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Callable
 
 from app.config import ExperimentConfig
 from app.data.ingest import Bar
@@ -89,6 +89,7 @@ def train_and_combat(
     elite_pool_size: int = 8,
     min_consistency: float = 0.6,
     seed: int = 42,
+    progress: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> ArenaResult:
     """Mass-produces chromosomes on historical bars and conducts anti-overfitting arena combat."""
     lookback = pipeline.LOOKBACK
@@ -111,6 +112,8 @@ def train_and_combat(
         holdout = (mid, len(bars))
 
     rng = random.Random(seed)
+    if progress:
+        progress("state", {"to": "ARENA_EVOLUTION", "reason": "Generating and scoring arena chromosomes", "fold": 0})
 
     # 3. Mass generation of candidate chromosomes
     pop: list[Chromosome] = []
@@ -124,6 +127,8 @@ def train_and_combat(
     # 4. Multi-generation evolution across In-Sample folds
     is_fold = folds[0]
     for gen in range(generations):
+        import time
+        generation_started = time.time()
         scored: list[tuple[Chromosome, float]] = []
         for c in pop:
             res = simulate(c, ctx, is_fold.is_start, is_fold.is_end)
@@ -135,6 +140,17 @@ def train_and_combat(
             scored.append((c, f))
 
         scored.sort(key=lambda x: x[1], reverse=True)
+        if progress:
+            fitness_values = [score for _, score in scored]
+            progress("generation", {
+                "fold": 0, "gen": gen, "best": round(fitness_values[0], 4) if fitness_values else 0.0,
+                "mean": round(sum(fitness_values) / len(fitness_values), 4) if fitness_values else 0.0,
+                "worst": round(fitness_values[-1], 4) if fitness_values else 0.0,
+                "valid": len(scored), "population": len(pop), "generations": generations, "folds": 1,
+                "seconds": round(time.time() - generation_started, 3), "failed_risk": sum(c.state == "FAILED_RISK" for c in pop),
+                "best_id": scored[0][0].id if scored else "",
+                "training_mode": "arena",
+            })
         if gen < generations - 1:
             pop, _ = population.next_generation(rng, scored, [], pop_size, gen + 1, cfg.ga)
             total_spawned += len(pop)
@@ -144,10 +160,15 @@ def train_and_combat(
             elite_combatants = population.select_diverse_elite(scored, k=elite_pool_size)
 
     if not elite_combatants:
+        if progress:
+            progress("state", {"to": "ARENA_COMPLETED", "reason": "No candidates survived IS evolution", "fold": 0})
         return ArenaResult(champion=None, total_spawned=total_spawned, is_survivors=0,
                            oos_qualifiers=0, combatants=[], summary="no candidates survived IS evolution")
 
     is_survivors = len(elite_combatants)
+
+    if progress:
+        progress("state", {"to": "ARENA_COMBAT", "reason": "Testing IS survivors against WFA and holdout gates", "fold": 0})
 
     # 5. Combat Arena: test elites against multiple Out-Of-Sample folds & Holdout
     combatant_records: list[ArenaCombatant] = []
@@ -234,6 +255,8 @@ def train_and_combat(
         champ_rec = next(r for r in combatant_records if r.chromosome.id == champion.id)
         summary = (f"Champion {champion.id} crowned: holdout PnL={champ_pnl:.2f}, "
                    f"WFA consistency={champ_rec.consistency:.2f}, retention={champ_rec.neighbour_retention:.2f}")
+        if progress:
+            progress("state", {"to": "ARENA_COMPLETED", "reason": summary, "fold": 0})
         return ArenaResult(
             champion=champion,
             total_spawned=total_spawned,
@@ -246,6 +269,8 @@ def train_and_combat(
         )
 
     summary = f"Combat completed with {is_survivors} IS survivors, but none satisfied strict anti-overfitting gates."
+    if progress:
+        progress("state", {"to": "ARENA_COMPLETED", "reason": summary, "fold": 0})
     return ArenaResult(
         champion=None,
         total_spawned=total_spawned,
@@ -266,6 +291,7 @@ def auto_train_until_survivor(
     min_consistency: float = 0.6,
     seed: int = 42,
     max_rounds: int = 10,
+    progress: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> tuple[ArenaResult, int]:
     """Repeatedly conducts arena combat with progressive seed shifts and elite carry-over
     until at least one champion satisfies strict anti-overfitting gates, or max_rounds is reached."""
@@ -284,6 +310,7 @@ def auto_train_until_survivor(
             elite_pool_size=elite_pool_size,
             min_consistency=min_consistency,
             seed=current_seed,
+            progress=(lambda etype, payload: progress(etype, payload | {"round": round_idx}) if progress else None),
         )
         res.round_number = round_idx
         res.total_rounds = round_idx
