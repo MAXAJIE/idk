@@ -133,20 +133,27 @@ def test_narrate_none_makes_no_call(tmp_path, cfg):
 
 
 def test_root_and_backend_launch_share_defaults():
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).parents[2]
     env = {k: v for k, v in os.environ.items() if not k.startswith("LLM_")}
     env.pop("CGTRS_DB", None)
-    results = [subprocess.run([sys.executable, "-c", "from app.cli import DB; print(DB)"],
-                              cwd=path, env=env, capture_output=True, text=True, check=True).stdout.strip()
-               for path in (root, root / "backend")]
+    results = []
+    for path in (root, root / "backend"):
+        e = dict(env)
+        backend_p = str(root / "backend" if path == root else path)
+        e["PYTHONPATH"] = f"{backend_p}:{e.get('PYTHONPATH', '')}".rstrip(":")
+        res = subprocess.run([sys.executable, "-c", "from app.cli import DB; print(DB)"],
+                             cwd=path, env=e, capture_output=True, text=True, check=True).stdout.strip()
+        results.append(res)
     assert results[0] == results[1]
     assert results[0].endswith("backend/data/cgtrs.sqlite")
 
 
 def test_cli_blocks_unqualified_order_mode_before_exchange():
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).parents[2]
+    env_root = dict(os.environ)
+    env_root["PYTHONPATH"] = f"{root / 'backend'}:{env_root.get('PYTHONPATH', '')}".rstrip(":")
     r = subprocess.run([sys.executable, "-m", "app.cli", "trade", "--experiment", "0001", "--allow-unqualified"],
-                       cwd=root, capture_output=True, text=True)
+                       cwd=root, env=env_root, capture_output=True, text=True)
     assert r.returncode == 2 and "requires --dry-run" in r.stderr
 
 

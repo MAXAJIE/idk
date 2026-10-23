@@ -43,11 +43,21 @@ def main():
     t.add_argument("--experiment", required=True); t.add_argument("--dry-run", action="store_true")
     t.add_argument("--once", action="store_true"); t.add_argument("--allow-unqualified", action="store_true")
     t.add_argument("--state"); t.add_argument("--kill-file", default="KILL")
+    t.add_argument("--auto-re-evolve", action="store_true", help="enable rolling walk-forward candidate re-evolution and safe hot-swap")
     s = sub.add_parser("serve"); s.add_argument("--db", default=DB); s.add_argument("--port", type=int, default=8000)
     sub.add_parser("llm-test")
     x = sub.add_parser("experiments"); x.add_argument("--db", default=DB)
     x = sub.add_parser("explain"); x.add_argument("--db", default=DB)
     x.add_argument("--experiment", default="latest")
+    tr = sub.add_parser("train", help="Mass-produce chromosomes on history data and run anti-overfitting arena combat")
+    tr.add_argument("--config", default="configs/default.json")
+    tr.add_argument("--db", default=DB)
+    tr.add_argument("--pop-size", type=int, default=32)
+    tr.add_argument("--generations", type=int, default=3)
+    tr.add_argument("--min-consistency", type=float, default=0.6)
+    tr.add_argument("--seed", type=int, default=42)
+    tr.add_argument("--auto", action="store_true", help="Auto-train continuously across adaptive rounds until a qualified champion is found, then stop and analyze")
+    tr.add_argument("--max-rounds", type=int, default=10, help="Max auto-train rounds when --auto is specified")
     a = ap.parse_args()
     if hasattr(a, "db"):
         a.db = backend_path(a.db)
@@ -79,6 +89,8 @@ def main():
         eid = resolve_experiment(store, a.experiment)
         exp = next(e for e in store.experiments() if e["id"] == eid)
         cfg = load_config(backend_path(a.config)) if a.config else ExperimentConfig.model_validate(exp["config"])
+        if a.auto_re_evolve:
+            cfg = cfg.model_copy(update={"live": cfg.live.model_copy(update={"auto_re_evolve": True})})
         if cfg.data.source != "binance":
             ap.error("trade requires a Binance research experiment, not synthetic/CSV data")
         state = backend_path(a.state or ("data/dry_state.json" if a.dry_run else "data/live_state.json"))
@@ -110,6 +122,33 @@ def main():
             states = [v["payload"] for v in store.events(e["id"], limit=100000) if v["type"] == "state"]
             if states and states[-1].get("reason"):
                 print("  reason:", states[-1]["reason"])
+    elif a.cmd == "train":
+        import time
+        from app.data import ingest
+        from app.learning.arena import train_and_combat, auto_train_until_survivor, analyze_arena_result
+        cfg = load_config(backend_path(a.config))
+        bars, snap = ingest.load(cfg.data)
+        print(f"Loaded {len(bars)} bars. Starting arena training (pop={a.pop_size}, gens={a.generations})...")
+        if a.auto:
+            res, rounds = auto_train_until_survivor(
+                bars, cfg, pop_size=a.pop_size, generations=a.generations,
+                min_consistency=a.min_consistency, seed=a.seed, max_rounds=a.max_rounds
+            )
+        else:
+            res = train_and_combat(bars, cfg, pop_size=a.pop_size, generations=a.generations,
+                                   min_consistency=a.min_consistency, seed=a.seed)
+            rounds = 1
+
+        print(analyze_arena_result(res, cfg, round_num=rounds))
+
+        if res.champion:
+            os.makedirs(os.path.dirname(a.db), exist_ok=True)
+            st = Store(a.db)
+            eid = f"arena_{int(time.time())}"
+            st.create_experiment(eid, f"arena:{cfg.data.symbol}", cfg.model_dump())
+            st.put(eid, "arena", "result", res.to_dict())
+            st.set_state(eid, "COMPLETED")
+            print(f"Saved arena results to experiment {eid} in database {a.db}")
     elif a.cmd == "explain":
         from app.live.runner import resolve_experiment
         from app.agents.narration import explain_experiment

@@ -14,7 +14,7 @@ def experiment(tmp_path_factory, request):
     import json
     from pathlib import Path
     from app.config import ExperimentConfig
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).parents[1]
     d = json.loads((root / "configs/default.json").read_text())
     d["data"]["n_bars"] = 1400
     d["wfa"] |= {"n_folds": 2, "is_bars": 500, "oos_bars": 200, "holdout_bars": 150}

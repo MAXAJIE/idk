@@ -5,7 +5,7 @@
     "symbol": "BTCUSDT",
     "exchange": "BINANCE_USDM",
     "timeframe_minutes": 60,
-    "n_bars": 3000,
+    "n_bars": 9000,
     "synthetic_seed": 7,
     "max_gap_bars": 0,
     "backend": "rest"

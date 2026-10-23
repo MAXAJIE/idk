@@ -5,7 +5,7 @@ import pytest
 
 from app.config import ExperimentConfig
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).parents[1]
 
 
 @pytest.fixture

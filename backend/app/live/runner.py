@@ -30,6 +30,8 @@ from app.genetic.schema import Chromosome
 from app.live.testnet import ExchangeError, TestnetClient
 from app.persistence.db import Store
 from app.risk import gate
+from app.learning.reflection import ReflectionMemory
+from app.learning.online_evolution import evaluate_rolling_challenger
 
 CONDITIONAL = ("STOP_MARKET", "TAKE_PROFIT_MARKET")
 
@@ -77,7 +79,19 @@ class LiveTrader:
         self.dry, self.kill = dry_run, Path(kill_file)
         self.state_path = Path(state_path)
         self.st = json.loads(self.state_path.read_text()) if self.state_path.exists() else {
-            "peak": None, "opened_ts": None, "halted": False, "last_bar": None}
+            "peak": None, "opened_ts": None, "halted": False, "last_bar": None,
+            "bars_since_evolution": 0, "closed_trade_count": 0, "consecutive_losses": 0,
+            "last_closed_trade_id": None}
+        # Restore reflection memory independently from the core trader state.
+        self.memory_path = self.state_path.with_suffix(".memory.json")
+        self.memory = ReflectionMemory.load(self.memory_path) if cfg.live.enable_reflection_memory else ReflectionMemory()
+        self._pending_signature = None
+        self._pending_entry_t = None
+        # Backward compatibility with state files created before learning support.
+        self.st.setdefault("bars_since_evolution", 0)
+        self.st.setdefault("closed_trade_count", 0)
+        self.st.setdefault("consecutive_losses", 0)
+        self.st.setdefault("last_closed_trade_id", None)
         self.eid = f"live_{chromo.id}_{time.time_ns()}"
         store.create_experiment(self.eid, f"testnet:{self.sym}", cfg.model_dump() | {"chromosome": chromo.to_dict()})
         store.set_state(self.eid, "LIVE_TESTNET" if not dry_run else "LIVE_DRY_RUN")
@@ -99,6 +113,36 @@ class LiveTrader:
     def save(self):
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.state_path.write_text(json.dumps(self.st))
+        if self.cfg.live.enable_reflection_memory:
+            self.memory.save(self.memory_path)
+
+    def _record_learning_outcome(self, pos: dict, last_ts: int):
+        """Record one exchange-confirmed closed position once; never infer PnL from proposal."""
+        qty = float(pos.get("qty") or 0.0)
+        entry = float(pos.get("entry") or 0.0)
+        if qty == 0 or entry <= 0:
+            return
+        key = f"{self.sym}:{entry:.12g}:{abs(qty):.12g}:{self.st.get('opened_ts')}"
+        if self.st.get("last_closed_trade_id") == key:
+            return
+        # Live exchange position response reports unrealized PnL while open.
+        # At closure, the preceding position snapshot was saved as a lightweight
+        # anchor; absent an anchor, skip rather than fabricate a realized result.
+        anchor = self.st.get("position_anchor") or {}
+        realized = anchor.get("realized_pnl")
+        if realized is None:
+            return
+        pnl = float(realized)
+        sig = self.st.get("position_signature", "unknown:unknown:unknown:unknown")
+        self.memory.record_outcome(sig, pnl, "exchange_closed", last_ts)
+        self.st["closed_trade_count"] = self.st.get("closed_trade_count", 0) + 1
+        self.st["consecutive_losses"] = self.st.get("consecutive_losses", 0) + 1 if pnl < 0 else 0
+        self.st["last_closed_trade_id"] = key
+        self.st["position_anchor"] = None
+        self.st["position_signature"] = None
+        self.emit("learning_outcome", {"signature": sig, "net_pnl": pnl,
+                                        "consecutive_losses": self.st["consecutive_losses"],
+                                        "closed_trade_count": self.st["closed_trade_count"]})
 
     # ---------- data
     def bars(self, n: int = 300) -> list[Bar]:
@@ -144,6 +188,64 @@ class LiveTrader:
         self.st["opened_ts"] = None
         self.save()
 
+    def _check_and_run_re_evolution(self, bars: list[Bar], last_ts: int):
+        """Periodically or conditionally run rolling continuous evolution and candidate hot-swap."""
+        if not self.cfg.live.auto_re_evolve:
+            return
+
+        self.st["bars_since_evolution"] = self.st.get("bars_since_evolution", 0) + 1
+        bars_since = self.st["bars_since_evolution"]
+        consec_losses = self.st.get("consecutive_losses", 0)
+        
+        # Trigger conditions: periodic interval reached OR adverse loss streak encountered
+        interval_trigger = bars_since >= self.cfg.live.re_evolve_interval_bars
+        loss_trigger = consec_losses >= self.cfg.live.loss_trigger_count
+
+        if not (interval_trigger or loss_trigger):
+            return
+
+        # Do not hot-swap while holding an active position on exchange
+        if self.st.get("opened_ts") is not None:
+            return
+
+        trigger_reason = f"loss streak ({consec_losses})" if loss_trigger else f"interval ({bars_since} bars)"
+        self.emit("online_evolution_triggered", {
+            "reason": trigger_reason,
+            "incumbent_id": self.c.id,
+            "bars_since": bars_since,
+            "consecutive_losses": consec_losses,
+            "bar_ts": last_ts
+        })
+
+        # Evaluate rolling challenger using window of latest bars
+        eval_bars = bars[-self.cfg.live.re_evolve_lookback_bars:] if len(bars) > self.cfg.live.re_evolve_lookback_bars else bars
+        eval_res = evaluate_rolling_challenger(
+            self.c,
+            eval_bars,
+            self.cfg,
+            min_improvement=self.cfg.live.hot_swap_min_improvement,
+            pop_size=12,
+            seed=int(last_ts % 100000)
+        )
+
+        self.emit("online_evolution_evaluation", eval_res.to_dict() | {"bar_ts": last_ts})
+
+        if eval_res.won and eval_res.challenger is not None:
+            old_id = self.c.id
+            self.c = eval_res.challenger
+            self.st["bars_since_evolution"] = 0
+            self.st["consecutive_losses"] = 0
+            self.emit("candidate_hot_swapped", {
+                "previous_id": old_id,
+                "new_id": self.c.id,
+                "improvement_frac": eval_res.improvement_frac,
+                "incumbent_pnl": eval_res.incumbent_net_pnl,
+                "challenger_pnl": eval_res.challenger_net_pnl,
+                "bar_ts": last_ts
+            })
+        else:
+            self.st["bars_since_evolution"] = 0
+
     # ---------- one closed bar
     def step(self) -> str:
         if self.kill.exists():
@@ -174,11 +276,23 @@ class LiveTrader:
             return "HALTED"
 
         self.st["last_bar"] = last.ts
+        self._check_and_run_re_evolution(bars, last.ts)
+
+        # Detect and reconcile existing open position on reconnect/restart
         if pos["qty"]:
+            if self.st.get("opened_ts") is None:
+                # Reconnection recovery: adopt existing open exchange trade
+                self.st["opened_ts"] = last.ts
+                self.emit("position_reconnected", {
+                    "bar_ts": last.ts, "qty": pos["qty"], "entry": pos.get("entry"),
+                    "upnl": pos.get("upnl"), "reconciled": True
+                })
             held = (last.ts - (self.st["opened_ts"] or last.ts)) // step_s
-            protect = [o for o in self.x.open_orders(self.sym) if o.get("type") in CONDITIONAL]
+            protect = [o for o in self.x.open_orders(self.sym) if o.get("type") in CONDITIONAL] if not self.dry else []
             self.emit("position", {"bar_ts": last.ts, "qty": pos["qty"], "entry": pos.get("entry"),
-                                   "upnl": pos.get("upnl"), "held_bars": held, "equity": equity})
+                                   "upnl": pos.get("upnl"), "held_bars": held, "equity": equity,
+                                   "protective_orders": len(protect)})
+            self.st["position_anchor"] = {"entry": pos.get("entry"), "realized_pnl": pos.get("realized_pnl")}
             if held >= self.c.g("stop_target", "max_hold_bars"):
                 self.flatten("time exit")
             self.save()
@@ -187,6 +301,7 @@ class LiveTrader:
             self._cancel_all() if not self.dry else None
             self.emit("position_closed", {"bar_ts": last.ts, "equity": equity})
             self.st["opened_ts"] = None
+            self._record_learning_outcome(self.st.get("position_anchor") or {}, last.ts)
 
         t = len(bars) - 1
         eb = pipeline.build(PITView(bars, t))
@@ -195,12 +310,37 @@ class LiveTrader:
         es = ema(closes, self.c.g("trend", "ema_slow"))[-1]
         disc = disc_mod.discuss(eb) if eb.valid else None
         prop = trader.propose(self.c, eb, disc, ef, es, equity)
+
+        # Reflection Memory check (negative constraint inhibitor)
+        inhibition = None
+        if self.cfg.live.enable_reflection_memory and prop.side in ("long", "short"):
+            entry_mode = getattr(prop, 'entry_mode', None) or self.c.genes.get('topology', {}).get('entry_mode', 'unknown')
+            sig = ReflectionMemory.signature_from_context(entry_mode, prop.side, eb)
+            inhibition = self.memory.check_inhibition(sig)
+            if inhibition.action == "VETO":
+                self.emit("reflection_inhibition", {"signature": sig, "action": "VETO",
+                                                    "reason": inhibition.reason, "bar_ts": last.ts})
+                self.emit("decision", {"bar_ts": last.ts, "equity": equity, "proposal": prop.model_dump(),
+                                       "risk": {"outcome": "REJECT", "reasons": [inhibition.reason]},
+                                       "reflection": inhibition.to_dict()})
+                self.save()
+                return "REJECT"
+
         risk_cfg = self.cfg.risk.model_copy(update={"max_cost_to_reward": min(
             self.cfg.risk.max_cost_to_reward, self.c.g("cost", "max_cost_to_reward"))})
         rd = gate.evaluate(prop, gate.AccountState(equity, 0, self.st["halted"]),
                            gate.MarketState(last, eb.valid, staleness), risk_cfg, self.cfg.costs)
+        
+        # Apply inhibition downsizing penalty if active
+        if inhibition and inhibition.action == "RESIZE_PENALTY" and rd.outcome in ("APPROVE", "RESIZE"):
+            penalized_qty = rd.approved_qty * inhibition.size_mult
+            rd = rd.model_copy(update={"approved_qty": penalized_qty, "outcome": "RESIZE"})
+            self.emit("reflection_inhibition", {"signature": inhibition.signature, "action": "RESIZE_PENALTY",
+                                                "reason": inhibition.reason, "size_mult": inhibition.size_mult, "bar_ts": last.ts})
+
         rec = {"bar_ts": last.ts, "equity": equity, "proposal": prop.model_dump(), "risk": rd.model_dump(),
-               "discussion": disc.model_dump() if disc else None}
+               "discussion": disc.model_dump() if disc else None,
+               "reflection": inhibition.to_dict() if inhibition else None}
         if rd.outcome not in ("APPROVE", "RESIZE"):
             self.emit("decision", rec)
             self.save()
@@ -234,6 +374,8 @@ class LiveTrader:
         shift = fill - prop.ref_price  # keep stop/target distances relative to the fill, as in the simulator
         stop, target = prop.stop + shift, prop.target + shift
         self.st["opened_ts"] = last.ts
+        entry_mode = getattr(prop, "entry_mode", None) or self.c.genes.get("topology", {}).get("entry_mode", "unknown")
+        self.st["position_signature"] = ReflectionMemory.signature_from_context(entry_mode, prop.side, eb)
         self.save()
         try:
             so = self._conditional(exit_side, "STOP_MARKET", stop)
@@ -250,12 +392,19 @@ class LiveTrader:
 
     def loop(self, max_steps: int | None = None):
         n = 0
+        consecutive_errors = 0
         while max_steps is None or n < max_steps:
             try:
                 out = self.step()
-            except ExchangeError as e:
-                self.emit("exchange_error", {"error": str(e)})
+                consecutive_errors = 0
+            except (ExchangeError, Exception) as e:
+                consecutive_errors += 1
+                self.emit("exchange_error", {"error": str(e), "consecutive": consecutive_errors})
                 out = "ERROR"
+                # If network/exchange error, wait backoff time before next attempt
+                if consecutive_errors <= 5:
+                    time.sleep(min(30.0, 2.0 * consecutive_errors))
+                    continue
             print(time.strftime("%H:%M:%S"), out, flush=True)
             if out in ("KILLED", "HALTED"):
                 return out

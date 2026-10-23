@@ -6,6 +6,8 @@ Safety:
   * Keys are read from the local environment only
     (BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET) and never persisted
     or logged.
+  * Resilient network handling: automatic timeout retry with exponential backoff
+    for transient connection failures, socket timeouts, and rate limits (429/5xx).
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ import hmac
 import json
 import math
 import os
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -68,11 +71,14 @@ def _dp(x: float) -> int:
 
 class TestnetClient:
     def __init__(self, base: str = DEFAULT_BASE, key: str | None = None, secret: str | None = None,
-                 timeout: float = 15.0, transport=None):
+                 timeout: float = 15.0, max_retries: int = 3, retry_backoff_s: float = 1.0,
+                 transport=None):
         self.base = assert_testnet(base)
         self.key = key if key is not None else os.environ.get("BINANCE_TESTNET_API_KEY", "")
         self.secret = secret if secret is not None else os.environ.get("BINANCE_TESTNET_API_SECRET", "")
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_backoff_s = retry_backoff_s
         self._transport = transport or self._http
 
     def _http(self, method: str, url: str, headers: dict) -> tuple[int, str]:
@@ -82,23 +88,52 @@ class TestnetClient:
                 return r.status, r.read().decode()
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode()
+        except (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionResetError) as e:
+            # Represent transient network disconnect / timeout as status 599 for retry handling
+            return 599, f'{{"error": "NetworkError", "detail": "{str(e)}"}}'
 
     def request(self, method: str, path: str, params: dict | None = None, signed: bool = False):
         params = {k: v for k, v in (params or {}).items() if v is not None}
         headers = {"User-Agent": "cgtrs/2"}
-        if signed:
-            if not (self.key and self.secret):
-                raise RuntimeError("BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET not set")
-            params |= {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
-            q = urllib.parse.urlencode(params)
-            q += "&signature=" + sign(self.secret, q)
-            headers["X-MBX-APIKEY"] = self.key
-        else:
-            q = urllib.parse.urlencode(params)
-        status, body = self._transport(method, f"{self.base}{path}?{q}", headers)
-        if status >= 400:
-            raise ExchangeError(status, body)
-        return json.loads(body) if body else {}
+
+        retries = 0
+        last_status = 0
+        last_body = ""
+
+        while retries <= self.max_retries:
+            curr_params = dict(params)
+            if signed:
+                if not (self.key and self.secret):
+                    raise RuntimeError("BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET not set")
+                curr_params |= {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
+                q = urllib.parse.urlencode(curr_params)
+                q += "&signature=" + sign(self.secret, q)
+                headers["X-MBX-APIKEY"] = self.key
+            else:
+                q = urllib.parse.urlencode(curr_params)
+
+            try:
+                status, body = self._transport(method, f"{self.base}{path}?{q}", headers)
+            except Exception as e:
+                status, body = 599, f'{{"error": "TransportError", "detail": "{str(e)}"}}'
+
+            # Success
+            if 200 <= status < 300:
+                return json.loads(body) if body else {}
+
+            last_status, last_body = status, body
+
+            # If client error (4xx except 429), don't retry (e.g. invalid signature, bad parameters)
+            if 400 <= status < 500 and status != 429:
+                raise ExchangeError(status, body)
+
+            # Retry on rate limit 429 or server errors / network disconnects (5xx, 599)
+            retries += 1
+            if retries <= self.max_retries:
+                backoff = self.retry_backoff_s * (2 ** (retries - 1))
+                time.sleep(backoff)
+
+        raise ExchangeError(last_status, last_body)
 
     # --- public
     def klines(self, symbol: str, interval: str, limit: int = 500):

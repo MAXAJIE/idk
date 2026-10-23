@@ -20,7 +20,7 @@ DB = os.environ.get("CGTRS_DB", "data/cgtrs.sqlite")
 # built console (npm run build) is served at / when present
 CONSOLE = Path(__file__).with_name("console.html")  # built-in console (default UI)
 USE_DIST = os.environ.get("CGTRS_UI", "builtin") == "dist"
-UI_DIST = Path(os.environ.get("CGTRS_UI_DIST", Path(__file__).resolve().parents[3] / "frontend" / "dist"))
+UI_DIST = Path(os.environ.get("CGTRS_UI_DIST", Path(__file__).parents[3] / "frontend" / "dist"))
 
 LANDING = """<!doctype html><meta charset=utf-8><title>CGTRS API</title>
 <body style="font:14px system-ui;max-width:640px;margin:40px auto;line-height:1.5">
