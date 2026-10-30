@@ -1,0 +1,25 @@
+diff a/backend/tests/test_console_tabs.py b/backend/tests/test_console_tabs.py	(rejected hunks)
+@@ -40,7 +40,7 @@
+     c = TestClient(create_app(str(tmp_path / "c.sqlite")))
+     for path in ("/", "/console"):
+         html = c.get(path).text
+-        assert "Debate &amp; indicators" in html and 'data-tab="training"' in html
++        assert "Agent Debate" in html and 'data-tab="training"' in html
+ 
+ 
+ def test_training_api_includes_arena_progress_and_results(tmp_path):
+@@ -120,3 +120,14 @@
+         _ = ws.receive_json()
+         # Normal client close
+         ws.close()
++
++
++def test_console_exposes_separate_optional_agent_debate_and_judge():
++    from app.api.read_only import CONSOLE
++    html = CONSOLE.read_text()
++    assert 'id="agentDebate"' in html
++    assert 'id="btnAgentDebate"' in html
++    assert "Run bull vs bear agents" in html
++    assert "display-only" in html
++    assert 'agents=llm' in html
++    assert 'c.judge?.verdict' in html

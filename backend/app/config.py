@@ -110,6 +110,7 @@ class LiveConfig(Frozen):
     base_url: str = "https://testnet.binancefuture.com"
     signal_source: Literal["testnet", "mainnet"] = "testnet"
     close_grace_s: float = 5.0
+    recv_window_ms: int = 10000
     auto_re_evolve: bool = False
     re_evolve_interval_bars: int = 48
     re_evolve_lookback_bars: int = 300

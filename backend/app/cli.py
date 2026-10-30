@@ -60,7 +60,7 @@ def main():
     t.add_argument("--config"); t.add_argument("--db", default=DB)
     t.add_argument("--experiment", default="best", help="experiment ID or 'best' for automatic best qualified chromosome (default)"); t.add_argument("--dry-run", action="store_true")
     t.add_argument("--once", action="store_true"); t.add_argument("--allow-unqualified", action="store_true")
-    t.add_argument("--state"); t.add_argument("--kill-file", default="KILL")
+    t.add_argument("--state"); t.add_argument("--kill-file", default="KILL", help="local kill-switch file path (relative paths resolve under backend/); if present, trading halts and open positions are flattened")
     t.add_argument("--auto-re-evolve", action="store_true", help="enable rolling walk-forward candidate re-evolution and safe hot-swap")
     s = sub.add_parser("serve"); s.add_argument("--db", default=DB); s.add_argument("--port", type=int, default=8000)
     sub.add_parser("llm-test")
@@ -126,9 +126,11 @@ def main():
                 flush=True,
             )
         state = backend_path(a.state or ("data/dry_state.json" if a.dry_run else "data/live_state.json"))
+        kill_path = backend_path(a.kill_file)
         print(f"source experiment: {eid}; mode: {'DRY_RUN (no orders)' if a.dry_run else 'BINANCE_TESTNET'}", flush=True)
+        print(f"kill switch: {kill_path} ({'PRESENT: will halt' if Path(kill_path).exists() else 'not present'})", flush=True)
         lt = LiveTrader(cfg, chromo, store,
-                        TestnetClient(cfg.live.base_url), state, a.dry_run, backend_path(a.kill_file), eid)
+                        TestnetClient(cfg.live.base_url, recv_window=getattr(cfg.live, "recv_window_ms", 10000)), state, a.dry_run, kill_path, eid)
         print("live experiment", lt.eid)
         print(lt.loop(1 if a.once else None))
     elif a.cmd == "llm-test":
@@ -247,6 +249,8 @@ def main():
                     "decisions": (res.decisions or [])[-40:],
                     "narration": [],
                 })
+            if res.decisions:
+                st.put(eid, "arena", "decisions", {"decisions": res.decisions})
 
             st.append(eid, "final_ranking", {
                 "qualified": [c.chromosome.id for c in res.combatants if c.qualified],

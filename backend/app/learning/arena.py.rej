@@ -1,0 +1,128 @@
+diff a/backend/app/learning/arena.py b/backend/app/learning/arena.py	(rejected hunks)
+@@ -18,6 +18,7 @@
+ from typing import Any, Callable
+ 
+ from app.config import ExperimentConfig
++from app.agents.judge import review as judge_review
+ from app.data.ingest import Bar
+ from app.data.point_in_time import PITView
+ from app.features import pipeline
+@@ -56,6 +57,7 @@
+     holdout_win_rate: float | None = None
+     holdout_passed: bool | None = None
+     wfa_qualified: bool = False
++    judge: dict[str, Any] = field(default_factory=dict)
+ 
+     def to_dict(self) -> dict[str, Any]:
+         d = asdict(self)
+@@ -293,7 +295,7 @@
+     for c in elite_combatants:
+         is_res = simulate(c, ctx, is_fold.is_start, is_fold.is_end)
+         is_pnl = is_res["scorecard"]["net_pnl"]
+-        fold_results = [simulate(c, ctx, f.oos_start, f.oos_end) for f in folds]
++        fold_results = [simulate(c, ctx, f.oos_start, f.oos_end, record=True) for f in folds]
+         positive = []
+         for fold, result in zip(folds, fold_results):
+             card = result["scorecard"]
+@@ -316,11 +318,29 @@
+         stress = simulate(c, stress_ctx, folds[-1].oos_start, folds[-1].oos_end)
+         cost_stress_passed = stress["scorecard"]["net_return"] > -0.005 and not stress["failed_risk"]
+ 
++        all_oos_trades = [trade for result in fold_results for trade in result["trades"]]
++        all_oos_decisions = [decision for result in fold_results for decision in result["decisions"]]
++        decision_map = {d["proposal"]["decision_id"]: d["proposal"] for d in all_oos_decisions}
++        valid_evidence = {
++            d["proposal"]["decision_id"]: {evidence[d["t"]].id(kind) for kind in evidence[d["t"]].items}
++            for d in all_oos_decisions
++        }
++        judge_packet = {
++            "trades": all_oos_trades,
++            "exit_range_atr": {key: value for result in fold_results
++                                for key, value in result["exit_range_atr"].items()},
++            "decisions": decision_map, "valid_evidence": valid_evidence,
++            "robustness": {"retention": retention}, "oos_scorecard": oos_card,
++        }
++        verdict = judge_review(c.id, judge_packet, cfg.judge, cfg.gates, cfg.risk.initial_equity)
+         qualified = (len(positive) >= cfg.wfa.min_oos_folds
+                      and consistency >= min_consistency
+                      and retention >= 0.20
+-                     and cost_stress_passed)
++                     and cost_stress_passed
++                     and verdict.verdict == "RETAIN")
+         reasons = []
++        if verdict.verdict != "RETAIN":
++            reasons.append(f"Judge {verdict.verdict}: {verdict.rationale}")
+         if len(positive) < cfg.wfa.min_oos_folds:
+             reasons.append(f"too few profitable OOS folds ({len(positive)} < {cfg.wfa.min_oos_folds})")
+         if consistency < min_consistency:
+@@ -421,49 +441,27 @@
+     max_rounds: int = 10,
+     progress: Callable[[str, dict[str, Any]], None] | None = None,
+ ) -> tuple[ArenaResult, int]:
+-    """Repeatedly conducts arena combat with progressive seed shifts and elite carry-over
+-    until at least one champion satisfies strict anti-overfitting gates, or max_rounds is reached."""
+-    current_seed = seed
+-    carried_pool: list[Chromosome] = list(base_population) if base_population else []
+-    last_res: ArenaResult | None = None
+-
+-    for round_idx in range(1, max_rounds + 1):
+-        print(f"\n--- [Auto-Train Round {round_idx}/{max_rounds}] seed={current_seed} pop={pop_size} gens={generations} ---", flush=True)
+-        res = train_and_combat(
+-            bars=bars,
+-            cfg=cfg,
+-            base_population=carried_pool if carried_pool else None,
+-            pop_size=pop_size,
+-            generations=generations,
+-            elite_pool_size=elite_pool_size,
+-            min_consistency=min_consistency,
+-            seed=current_seed,
+-            progress=(lambda etype, payload: progress(etype, payload | {"round": round_idx}) if progress else None),
+-        )
+-        res.round_number = round_idx
+-        res.total_rounds = round_idx
+-        last_res = res
+-
+-        print(f"Round {round_idx} result: {res.summary} (Spawned: {res.total_spawned}, IS Survivors: {res.is_survivors}, OOS Qualifiers: {res.oos_qualifiers})", flush=True)
+-
+-        if res.champion is not None or res.holdout_attempted:
+-            print(f">>> Final holdout used; stopping auto-training after round {round_idx}.", flush=True)
+-            return res, round_idx
+-
+-        # If no champion, carry top robust performers (by consistency, retention & OOS PnL) to next round
+-        if res.combatants:
+-            robust_combatants = sorted(
+-                res.combatants,
+-                key=lambda x: (x.consistency, x.neighbour_retention, x.oos_pnl, -abs(x.is_pnl - x.oos_pnl)),
+-                reverse=True,
+-            )
+-            carried_pool = [c.chromosome for c in robust_combatants[:4]]
+-        current_seed = (current_seed * 1103515245 + 12345) & 0x7FFFFFFF
+-
+-    if last_res is not None:
+-        last_res.total_rounds = max_rounds
+-        return last_res, max_rounds
+-    return ArenaResult(champion=None, total_spawned=0, is_survivors=0, oos_qualifiers=0, combatants=[]), max_rounds
++    """Run one bounded evolutionary search on fixed WFA windows.
++
++    Outer-loop seed retries on the same OOS windows constitute repeated
++    validation peeking. Evolution therefore happens only inside this call; a
++    failed run requires genuinely fresh, untouched validation history.
++    """
++    if progress:
++        progress("state", {"to": "AUTO_SEARCH_SINGLE_PASS",
++                           "reason": "One WFA search only; do not reuse these OOS windows for seed retries", "round": 1})
++    res = train_and_combat(
++        bars=bars, cfg=cfg, base_population=base_population,
++        pop_size=pop_size, generations=generations,
++        elite_pool_size=elite_pool_size, min_consistency=min_consistency,
++        seed=seed,
++        progress=(lambda etype, payload: progress(etype, payload | {"round": 1}) if progress else None),
++    )
++    res.round_number = 1
++    res.total_rounds = 1
++    if max_rounds > 1:
++        res.summary += " Auto mode stopped after one search to protect the same OOS windows from repeated tuning."
++    return res, 1
+ 
+ 
+ def analyze_arena_result(res: ArenaResult, cfg: ExperimentConfig, round_num: int = 1) -> str:

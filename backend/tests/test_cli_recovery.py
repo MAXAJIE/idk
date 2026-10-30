@@ -11,7 +11,7 @@ from app.cli import prepare_trade_config
 from app.agents.provider import FailedProvider, LLMError, OpenAICompatibleProvider, get_provider, llm_status
 from app.genetic.population import initial
 from app.live.runner import LiveTrader, find_best_chromosome, pick_chromosome, resolve_experiment
-from app.live.testnet import SymbolRules
+from app.live.testnet import ExchangeError, SymbolRules
 from app.persistence.db import Store
 
 
@@ -114,6 +114,38 @@ def test_best_auto_selects_highest_scoring_qualified_arena_champion(tmp_path, cf
     assert chromo.id == high.id
     assert eid == "arena_high"
     assert meta["type"] == "arena_champion"
+
+
+def test_live_kill_switch_reports_file_and_halts_before_market_data(tmp_path, cfg, capsys):
+    st = research(tmp_path, cfg)
+    kill_file = tmp_path / "KILL"
+    kill_file.write_text("stop")
+
+    class Exchange:
+        base = "https://testnet.binancefuture.com"
+        def rules(self, symbol):
+            return SymbolRules(step=.001, min_qty=.001, tick=.1, min_notional=5)
+        def equity(self):
+            return 1000.0
+        def position(self, symbol):
+            return {"qty": 0.0, "entry": 0.0, "upnl": 0.0}
+        def open_orders(self, symbol):
+            return []
+        def cancel_all(self, symbol):
+            pass
+        def request(self, *args, **kwargs):
+            raise ExchangeError(400, "algo orders unsupported")
+
+    live = LiveTrader(cfg, chromosome(), st, Exchange(), str(tmp_path / "state.json"),
+                      False, str(kill_file))
+    assert live.step() == "KILLED"
+    output = capsys.readouterr().out
+    assert "[KILL SWITCH]" in output
+    assert str(kill_file.resolve()) in output
+    assert "[KILL SWITCH] Consumed:" in output
+    assert not kill_file.exists()  # Trigger file was consumed / archived
+    halted = [e for e in st.events(live.eid, limit=100) if e["type"] == "halted"]
+    assert halted[-1]["payload"]["reason"] == "kill switch"
 
 
 def test_live_startup_reconciles_open_exchange_position(tmp_path, cfg):
@@ -362,6 +394,38 @@ def test_explain_experiment_arena_synthetic_fallback(tmp_path, cfg, monkeypatch)
     assert rows[0]["scope"] == "arena_champion"
     assert rows[0]["decision_id"] == "dec:chr_arena_champ:arena"
     assert rows[0]["valid"] is True
+
+
+def test_explain_experiment_arena_no_champion_explains_top_combatant(tmp_path, cfg):
+    from app.persistence.db import Store
+    st = Store(str(tmp_path / "test_no_champ.sqlite"))
+    eid = "arena_1792752590905"
+    st.create_experiment(eid, "arena", cfg.model_dump())
+    st.set_state(eid, "COMPLETED")
+    arena_res = {
+        "champion": None,
+        "champion_oos_pnl": 0.0,
+        "champion_consistency": 0.0,
+        "summary": "Final one-time holdout check failed",
+        "combatants": [
+            {
+                "chromosome": {"id": "chr_top_candidate", "genes": {}, "generation": 1},
+                "qualified": False,
+                "wfa_qualified": True,
+                "selection_score": 0.05,
+                "oos_pnl": 12.3,
+                "consistency": 0.8,
+            }
+        ],
+    }
+    st.put(eid, "arena", "result", arena_res)
+    # Test using default provider (OfflineProvider) without monkeypatching FakeLLM
+    rows = explain_experiment(st, eid, cfg)
+    assert len(rows) == 1
+    assert rows[0]["scope"] == "arena_candidate"
+    assert rows[0]["decision_id"] == "dec:chr_top_candidate:arena"
+    assert rows[0]["valid"] is True
+    assert "chr_top_candidate" in rows[0]["text"]
 
 
 def test_resolve_experiment_latest_supports_arena(tmp_path, cfg):

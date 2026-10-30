@@ -103,7 +103,7 @@
 <nav>
   <button data-tab="training" class="on">🏋️ Training</button>
   <button data-tab="live">⚡ Live Trading</button>
-  <button data-tab="debate">📊 Debate &amp; indicators</button>
+  <button data-tab="debate">⚖️ Agent Debate</button>
 </nav>
 
 <main>
@@ -194,8 +194,20 @@
   <!-- DEBATE & INDICATORS -->
   <div class="tab grid" id="tab-debate">
     <section class="card s12">
-      <h2><span class="dot" id="anDot"></span> Rule-based bull vs bear · last closed candle <span class="note" id="anNote"></span></h2>
+      <h2><span class="dot" id="anDot"></span> Evidence debate · last closed candle <span class="note" id="anNote"></span></h2>
       <div id="verdict"><div class="empty">Loading…</div></div>
+    </section>
+    <section class="card s12">
+      <h2>Two-agent cross-examination <span class="note">Optional LLM; evidence checked; never controls trades or risk</span></h2>
+      <p class="muted">Run two separate analyst turns on the same closed-candle evidence. The bear must respond to the bull's case. Provider output is untrusted and display-only.</p>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+        <button class="btn-sm active" id="btnAgentDebate" type="button">Run bull vs bear agents (full 2-round debate)</button>
+        <button class="btn-sm" id="btnQuickDebate" type="button">Quick 1-round debate</button>
+        <label class="muted" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="chkAutoDebate"> <span>Auto-monitor closed candles</span></label>
+        <span id="debateStatusBadge" class="pill muted">Ready</span>
+      </div>
+      <div id="debateProgress" style="display:none;margin-bottom:12px;padding:8px 12px;background:var(--panel2);border-radius:6px;border-left:3px solid var(--accent);font-size:13px"></div>
+      <div id="agentDebate" aria-live="polite"><div class="empty">Click to run an optional, evidence-cited agent debate.</div></div>
     </section>
     <section class="card s6"><div class="side bull" id="bull"></div></section>
     <section class="card s6"><div class="side bear" id="bear"></div></section>
@@ -502,7 +514,7 @@ async function refreshTraining() {
   if (ar) {
     const combatants = (ar.combatants || []).slice().sort((a, b) => Number(b.qualified) - Number(a.qualified) || b.selection_score - a.selection_score);
     $("arenaResults").innerHTML = `<p>${ar.champion ? `<b class="up">Champion: ${esc(ar.champion.id)}</b>` : `<b class="warn">No qualified survivor</b>`} · ${esc(ar.summary || "")} · spawned ${ar.total_spawned ?? "—"} · IS survivors ${ar.is_survivors ?? "—"} · OOS qualifiers ${ar.oos_qualifiers ?? "—"}</p>` +
-      table([["Gene"], ["Result"], ["IS PnL", "num"], ["Median WFA PnL", "num"], ["Final holdout PnL", "num"], ["WFA", "num"], ["Retention", "num"], ["Gate notes"]], combatants.map(c => `<tr><td class="mono">${esc(c.chromosome?.id || "—")}</td><td>${c.qualified ? pill("QUALIFIED") : pill("REJECTED")}</td><td class="num">${fmt(c.is_pnl)}</td><td class="num ${cls(c.oos_pnl)}">${fmt(c.oos_pnl)}</td><td class="num ${cls(c.holdout_pnl)}">${c.holdout_pnl == null ? "—" : fmt(c.holdout_pnl)}</td><td class="num">${fmt((c.consistency || 0) * 100, 1)}%</td><td class="num">${fmt(c.neighbour_retention, 2)}</td><td class="wrap muted">${esc(c.status_reason || "")}</td></tr>`));
+      table([["Gene"], ["Result"], ["IS PnL", "num"], ["Median WFA PnL", "num"], ["Final holdout PnL", "num"], ["WFA", "num"], ["Retention", "num"], ["Judge"], ["Gate notes"]], combatants.map(c => `<tr><td class="mono">${esc(c.chromosome?.id || "—")}</td><td>${c.qualified ? pill("QUALIFIED") : pill("REJECTED")}</td><td class="num">${fmt(c.is_pnl)}</td><td class="num ${cls(c.oos_pnl)}">${fmt(c.oos_pnl)}</td><td class="num ${cls(c.holdout_pnl)}">${c.holdout_pnl == null ? "—" : fmt(c.holdout_pnl)}</td><td class="num">${fmt((c.consistency || 0) * 100, 1)}%</td><td class="num">${fmt(c.neighbour_retention, 2)}</td><td>${pill(c.judge?.verdict || "—")}</td><td class="wrap muted">${esc([c.status_reason || "", c.judge?.rationale || ""].filter(Boolean).join(" · "))}</td></tr>`));
   } else {
     $("arenaResults").innerHTML = `<div class="empty">${train.plan.mode === "arena" ? (running ? "Arena is training; candidate results will appear after combat." : "Arena result was not saved.") : "This experiment is not an arena training run."}</div>`;
   }
@@ -723,7 +735,129 @@ async function refreshAnalysis() {
   $("analysts").innerHTML = (an.analysts || []).map(a => `<div class="narr ${a.insufficient_evidence ? "bad" : ""}"><b>${esc(a.role)}</b><div>${esc(a.summary)}</div>${a.missing?.length ? `<div class="down">missing: ${esc(a.missing.join(", "))}</div>` : ""}</div>`).join("") || `<div class="empty">—</div>`;
   $("evidence").innerHTML = Object.entries(an.evidence || {}).map(([k, v]) => `<div><b>${esc(k)}</b>${esc(Object.entries(v || {}).map(([a, b]) => `${a}: ${typeof b === "object" && b ? JSON.stringify(b) : b}`).join("\n"))}</div>`).join("").replace(/\n/g, "<br>");
   drawIndicators();
+  if ($("chkAutoDebate")?.checked && an?.bar_ts && an.bar_ts !== lastDebatedBarTs && !isDebating) {
+    runDebate(2, false);
+  }
 }
+
+let lastDebatedBarTs = null;
+let isDebating = false;
+
+function highlightEvidence(id) {
+  const evBox = $("evidence");
+  if (!evBox) return;
+  evBox.scrollIntoView({behavior: "smooth", block: "center"});
+  evBox.style.outline = "2px solid var(--accent)";
+  setTimeout(() => { evBox.style.outline = ""; }, 1500);
+}
+
+function renderAgentDebate(payload) {
+  const box = $("agentDebate");
+  if (!payload || payload.status !== "complete") {
+    box.innerHTML = `<div class="narr bad" style="margin-top:10px"><b>Agent debate unavailable</b><div>${esc(payload?.reason || "No response received")}</div></div>`;
+    return;
+  }
+
+  const pos = Math.min(100, Math.max(0, ((payload.score ?? 0) + 1) / 2 * 100));
+  const rounds = payload.rounds || (payload.turns?.length > 2 ? 2 : 1);
+
+  let html = `
+    <div class="stats" style="margin-top:12px">
+      ${stat("Debate outcome", pill(payload.recommendation), "", true)}
+      ${stat("Evidence balance", fmt(payload.score, 3), cls(payload.score))}
+      ${stat("Debate format", `${rounds} rounds (${payload.turns?.length || 0} turns)`, "", true)}
+      ${stat("Provider", esc(payload.provider || "LLM"), "", true)}
+    </div>
+    <div style="margin-top:12px" class="meter"><i style="left:calc(${pos}% - 2px)"></i></div>
+    <div class="legend" style="justify-content:space-between;margin-top:4px">
+      <span>bear −1.0</span><span>neutral (±0.2)</span><span>bull +1.0</span>
+    </div>
+    ${payload.judge_summary ? `<div class="narr" style="margin-top:14px"><b>⚖️ Debate judge synthesis &amp; evidence verdict</b><div>${esc(payload.judge_summary)}</div></div>` : ""}
+    <p class="note" style="margin-top:10px">${esc(payload.scope || "Research display only; cannot alter trading decisions or risk gates")}</p>
+    <div class="debate-timeline" style="display:flex;flex-direction:column;gap:12px;margin-top:14px">
+  `;
+
+  (payload.turns || []).forEach((t, idx) => {
+    const isBull = t.role === "bull";
+    const roundNum = Math.floor(idx / 2) + 1;
+    const stageName = t.stage ? esc(t.stage) : (idx < 2 ? (isBull ? "Opening Thesis" : "Cross-Examination") : (isBull ? "Rebuttal & Defense" : "Closing Summary"));
+    const title = `Round ${roundNum} · ${isBull ? "🐂 Bull Analyst" : "🐻 Bear Analyst"} · ${stageName}`;
+
+    html += `
+      <section class="side ${t.role}">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <h3 style="margin:0;font-size:14px">${title}</h3>
+          <span class="muted" style="font-size:12px">uncertainty: <b class="mono">${fmt(t.uncertainty, 2)}</b></span>
+        </div>
+
+        <div style="margin:8px 0">
+          <b>Supporting Claims (${t.claims?.length || 0})</b>
+          <ul style="margin:4px 0 8px 18px">
+            ${(t.claims || []).map(c => `
+              <li>${esc(c.text)}
+                <span class="pill muted mono ev-chip" style="cursor:pointer;padding:1px 6px;font-size:11px" onclick="highlightEvidence('${esc(c.evidence_id)}')">${esc(c.evidence_id)}</span>
+                <span class="muted mono">w=${fmt(c.weight, 2)}</span>
+              </li>
+            `).join("") || "<li>No supported claims asserted.</li>"}
+          </ul>
+        </div>
+
+        <div style="margin:8px 0">
+          <b>Counter-examination &amp; Rebuttals</b>
+          <ul style="margin:4px 0 8px 18px">
+            ${(t.counterarguments || []).map(x => `<li>↳ ${esc(x)}</li>`).join("") || "<li>No counterargument submitted.</li>"}
+          </ul>
+        </div>
+
+        <div class="muted" style="font-size:12px;border-top:1px dashed var(--line);padding-top:6px;margin-top:6px">
+          <b>Invalidation condition:</b> ${esc(t.invalidation || "none specified")}
+        </div>
+      </section>
+    `;
+  });
+
+  html += `</div>`;
+  box.innerHTML = html;
+}
+
+async function runDebate(rounds = 2, refresh = true) {
+  if (isDebating) return;
+  isDebating = true;
+  const btnFull = $("btnAgentDebate");
+  const btnQuick = $("btnQuickDebate");
+  const badge = $("debateStatusBadge");
+  const prog = $("debateProgress");
+
+  if (btnFull) btnFull.disabled = true;
+  if (btnQuick) btnQuick.disabled = true;
+  if (badge) { badge.className = "pill pulse"; badge.textContent = "DEBATING…"; }
+  if (prog) {
+    prog.style.display = "block";
+    prog.innerHTML = `<span>⚖️ Initializing ${rounds}-round bull vs bear cross-examination on closed candle evidence…</span>`;
+  }
+
+  try {
+    const symbol = $("sym").value;
+    const tf = $("tf").value;
+    const url = `/api/analysis/${symbol}?tf=${tf}&limit=300&agents=llm&rounds=${rounds}${refresh ? "&refresh=true" : ""}`;
+    const result = await j(url);
+    if (result.bar_ts) lastDebatedBarTs = result.bar_ts;
+    renderAgentDebate(result.agent_debate);
+    if (badge) { badge.className = "pill up"; badge.textContent = "COMPLETE"; }
+    if (prog) prog.style.display = "none";
+  } catch (e) {
+    $("agentDebate").innerHTML = `<div class="narr bad" style="margin-top:10px"><b>Debate error</b><div>${esc(e.message)}</div><div class="muted" style="margin-top:6px">Ensure LLM provider is configured in backend/.env. Check connectivity with: <code>python -m app.cli llm-test</code></div></div>`;
+    if (badge) { badge.className = "pill down"; badge.textContent = "ERROR"; }
+    if (prog) prog.style.display = "none";
+  } finally {
+    isDebating = false;
+    if (btnFull) btnFull.disabled = false;
+    if (btnQuick) btnQuick.disabled = false;
+  }
+}
+
+$("btnAgentDebate").onclick = () => runDebate(2, true);
+if ($("btnQuickDebate")) $("btnQuickDebate").onclick = () => runDebate(1, true);
 
 function drawIndicators() {
   if (!an || tab !== "debate") return;

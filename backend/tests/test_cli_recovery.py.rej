@@ -1,0 +1,49 @@
+diff a/backend/tests/test_cli_recovery.py b/backend/tests/test_cli_recovery.py	(rejected hunks)
+@@ -11,7 +11,7 @@
+ from app.agents.provider import FailedProvider, LLMError, OpenAICompatibleProvider, get_provider, llm_status
+ from app.genetic.population import initial
+ from app.live.runner import LiveTrader, find_best_chromosome, pick_chromosome, resolve_experiment
+-from app.live.testnet import SymbolRules
++from app.live.testnet import ExchangeError, SymbolRules
+ from app.persistence.db import Store
+ 
+ 
+@@ -116,6 +116,38 @@
+     assert meta["type"] == "arena_champion"
+ 
+ 
++def test_live_kill_switch_reports_file_and_halts_before_market_data(tmp_path, cfg, capsys):
++    st = research(tmp_path, cfg)
++    kill_file = tmp_path / "KILL"
++    kill_file.write_text("stop")
++
++    class Exchange:
++        base = "https://testnet.binancefuture.com"
++        def rules(self, symbol):
++            return SymbolRules(step=.001, min_qty=.001, tick=.1, min_notional=5)
++        def equity(self):
++            return 1000.0
++        def position(self, symbol):
++            return {"qty": 0.0, "entry": 0.0, "upnl": 0.0}
++        def open_orders(self, symbol):
++            return []
++        def cancel_all(self, symbol):
++            pass
++        def request(self, *args, **kwargs):
++            raise ExchangeError(400, "algo orders unsupported")
++
++    live = LiveTrader(cfg, chromosome(), st, Exchange(), str(tmp_path / "state.json"),
++                      False, str(kill_file))
++    assert live.step() == "KILLED"
++    output = capsys.readouterr().out
++    assert "[KILL SWITCH]" in output
++    assert str(kill_file.resolve()) in output
++    assert "[KILL SWITCH] Consumed:" in output
++    assert not kill_file.exists()  # Trigger file was consumed / archived
++    halted = [e for e in st.events(live.eid, limit=100) if e["type"] == "halted"]
++    assert halted[-1]["payload"]["reason"] == "kill switch"
++
++
+ def test_live_startup_reconciles_open_exchange_position(tmp_path, cfg):
+     st = research(tmp_path, cfg)
+     class Exchange:

@@ -7,7 +7,8 @@ Safety:
     (BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET) and never persisted
     or logged.
   * Resilient network handling: automatic timeout retry with exponential backoff
-    for transient connection failures, socket timeouts, and rate limits (429/5xx).
+    for transient connection failures, socket timeouts, rate limits (429/5xx),
+    and automatic server time synchronization on clock drift (Binance error -1021).
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import hashlib
 import hmac
 import json
 import math
+import re
 import os
 import socket
 import time
@@ -25,6 +27,7 @@ from dataclasses import dataclass
 
 TESTNET_HOSTS = {"testnet.binancefuture.com", "demo-fapi.binance.com"}
 DEFAULT_BASE = "https://testnet.binancefuture.com"
+DEFAULT_RECV_WINDOW = 10000
 
 
 class NotTestnetError(RuntimeError):
@@ -32,9 +35,22 @@ class NotTestnetError(RuntimeError):
 
 
 class ExchangeError(RuntimeError):
-    def __init__(self, status: int, body: str):
+    def __init__(self, status: int, body: str, ban_until_ms: int | None = None, retry_after_s: float | None = None):
         super().__init__(f"[{status}] {body[:400]}")
         self.status, self.body = status, body
+        self.ban_until_ms = ban_until_ms
+        self.retry_after_s = retry_after_s
+
+
+class RateLimitError(ExchangeError):
+    """Raised on HTTP 429 (Too Many Requests) or HTTP 418 / code -1003 (IP Banned)."""
+    pass
+
+
+def parse_ban_time(body: str) -> int | None:
+    """Parse timestamp from Binance message: IP(...) banned until <timestamp_ms>."""
+    m = re.search(r"banned until (\d+)", body)
+    return int(m.group(1)) if m else None
 
 
 def assert_testnet(base: str) -> str:
@@ -72,6 +88,7 @@ def _dp(x: float) -> int:
 class TestnetClient:
     def __init__(self, base: str = DEFAULT_BASE, key: str | None = None, secret: str | None = None,
                  timeout: float = 15.0, max_retries: int = 3, retry_backoff_s: float = 1.0,
+                 recv_window: int = DEFAULT_RECV_WINDOW, auto_sync_time: bool = True,
                  transport=None):
         self.base = assert_testnet(base)
         self.key = key if key is not None else os.environ.get("BINANCE_TESTNET_API_KEY", "")
@@ -79,6 +96,10 @@ class TestnetClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_backoff_s = retry_backoff_s
+        self.recv_window = max(1000, min(recv_window, 60000))
+        self.auto_sync_time = auto_sync_time
+        self.time_offset_ms: int = 0
+        self._last_sync_time: float = 0.0
         self._transport = transport or self._http
 
     def _http(self, method: str, url: str, headers: dict) -> tuple[int, str]:
@@ -92,6 +113,24 @@ class TestnetClient:
             # Represent transient network disconnect / timeout as status 599 for retry handling
             return 599, f'{{"error": "NetworkError", "detail": "{str(e)}"}}'
 
+    def sync_time(self) -> int:
+        """Fetch server time from /fapi/v1/time and compute offset against local system time."""
+        t_before = int(time.time() * 1000)
+        try:
+            status, body = self._transport("GET", f"{self.base}/fapi/v1/time", {"User-Agent": "cgtrs/2"})
+            t_after = int(time.time() * 1000)
+            if 200 <= status < 300 and body:
+                data = json.loads(body)
+                server_time = int(data.get("serverTime", 0))
+                if server_time > 0:
+                    local_est = (t_before + t_after) // 2
+                    self.time_offset_ms = server_time - local_est
+                    self._last_sync_time = time.time()
+                    return self.time_offset_ms
+        except Exception:
+            pass
+        return self.time_offset_ms
+
     def request(self, method: str, path: str, params: dict | None = None, signed: bool = False):
         params = {k: v for k, v in (params or {}).items() if v is not None}
         headers = {"User-Agent": "cgtrs/2"}
@@ -100,12 +139,17 @@ class TestnetClient:
         last_status = 0
         last_body = ""
 
+        # Auto-sync time before first signed request or if synced over 30 minutes ago
+        if signed and self.auto_sync_time and (self._last_sync_time == 0.0 or (time.time() - self._last_sync_time > 1800)):
+            self.sync_time()
+
         while retries <= self.max_retries:
             curr_params = dict(params)
             if signed:
                 if not (self.key and self.secret):
                     raise RuntimeError("BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET not set")
-                curr_params |= {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
+                ts = int(time.time() * 1000) + self.time_offset_ms
+                curr_params |= {"timestamp": ts, "recvWindow": self.recv_window}
                 q = urllib.parse.urlencode(curr_params)
                 q += "&signature=" + sign(self.secret, q)
                 headers["X-MBX-APIKEY"] = self.key
@@ -123,8 +167,18 @@ class TestnetClient:
 
             last_status, last_body = status, body
 
+            # Clock skew / recvWindow error (Binance code -1021) -> re-sync time offset and retry
+            is_time_error = (signed and status == 400 and ("-1021" in body or "outside of the recvWindow" in body))
+            if is_time_error:
+                retries += 1
+                if retries <= self.max_retries:
+                    self.sync_time()
+                    backoff = self.retry_backoff_s * (2 ** (retries - 1))
+                    time.sleep(backoff)
+                    continue
+
             # If client error (4xx except 429), don't retry (e.g. invalid signature, bad parameters)
-            if 400 <= status < 500 and status != 429:
+            if 400 <= status < 500 and status != 429 and not is_time_error:
                 raise ExchangeError(status, body)
 
             # Retry on rate limit 429 or server errors / network disconnects (5xx, 599)

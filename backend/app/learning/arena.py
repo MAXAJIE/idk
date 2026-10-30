@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
 from app.config import ExperimentConfig
+from app.agents.judge import review as judge_review
 from app.data.ingest import Bar
 from app.data.point_in_time import PITView
 from app.features import pipeline
@@ -56,6 +57,8 @@ class ArenaCombatant:
     holdout_win_rate: float | None = None
     holdout_passed: bool | None = None
     wfa_qualified: bool = False
+    judge: dict[str, Any] = field(default_factory=dict)
+    decisions: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -82,6 +85,19 @@ def rule_complexity(c: Chromosome) -> float:
     if c.g("topology", "compose") == "all":
         comp += 0.5
     return comp
+
+
+def _valid_evidence_by_decision(evidence: list[Any], decisions: list[dict[str, Any]]) -> dict[str, set[str]]:
+    """Return the exact evidence IDs available to each recorded decision.
+
+    EvidenceBundle.items is already keyed by canonical IDs (for example
+    ``ev:atr:123``). Passing those keys through EvidenceBundle.id() would add
+    a second prefix and cause the Judge to reject every cited profit.
+    """
+    return {
+        d["proposal"]["decision_id"]: set(evidence[d["t"]].items)
+        for d in decisions
+    }
 
 
 def selection_fitness(is_fitness: float, fold_fitness: list[float], complexity: float,
@@ -137,6 +153,7 @@ def train_and_combat(
     min_consistency: float = 0.6,
     seed: int = 42,
     progress: Callable[[str, dict[str, Any]], None] | None = None,
+    check_holdout: bool = True,
 ) -> ArenaResult:
     """Mass-produces chromosomes on historical bars and conducts anti-overfitting arena combat."""
     lookback = pipeline.LOOKBACK
@@ -293,7 +310,7 @@ def train_and_combat(
     for c in elite_combatants:
         is_res = simulate(c, ctx, is_fold.is_start, is_fold.is_end)
         is_pnl = is_res["scorecard"]["net_pnl"]
-        fold_results = [simulate(c, ctx, f.oos_start, f.oos_end) for f in folds]
+        fold_results = [simulate(c, ctx, f.oos_start, f.oos_end, record=True) for f in folds]
         positive = []
         for fold, result in zip(folds, fold_results):
             card = result["scorecard"]
@@ -316,11 +333,26 @@ def train_and_combat(
         stress = simulate(c, stress_ctx, folds[-1].oos_start, folds[-1].oos_end)
         cost_stress_passed = stress["scorecard"]["net_return"] > -0.005 and not stress["failed_risk"]
 
+        all_oos_trades = [trade for result in fold_results for trade in result["trades"]]
+        all_oos_decisions = [decision for result in fold_results for decision in result["decisions"]]
+        decision_map = {d["proposal"]["decision_id"]: d["proposal"] for d in all_oos_decisions}
+        valid_evidence = _valid_evidence_by_decision(evidence, all_oos_decisions)
+        judge_packet = {
+            "trades": all_oos_trades,
+            "exit_range_atr": {key: value for result in fold_results
+                                for key, value in result["exit_range_atr"].items()},
+            "decisions": decision_map, "valid_evidence": valid_evidence,
+            "robustness": {"retention": retention}, "oos_scorecard": oos_card,
+        }
+        verdict = judge_review(c.id, judge_packet, cfg.judge, cfg.gates, cfg.risk.initial_equity)
         qualified = (len(positive) >= cfg.wfa.min_oos_folds
                      and consistency >= min_consistency
                      and retention >= 0.20
-                     and cost_stress_passed)
+                     and cost_stress_passed
+                     and verdict.verdict == "RETAIN")
         reasons = []
+        if verdict.verdict != "RETAIN":
+            reasons.append(f"Judge {verdict.verdict}: {verdict.rationale}")
         if len(positive) < cfg.wfa.min_oos_folds:
             reasons.append(f"too few profitable OOS folds ({len(positive)} < {cfg.wfa.min_oos_folds})")
         if consistency < min_consistency:
@@ -336,6 +368,7 @@ def train_and_combat(
             qualified=False, status_reason="WFA-qualified; not selected for the single holdout check" if qualified else "; ".join(reasons),
             oos_return=round(oos_card["net_return"], 6),
             wfa_qualified=qualified,
+            decisions=all_oos_decisions,
             is_trades=is_res["scorecard"]["n_trades"],
             is_win_rate=round(is_res["scorecard"]["win_rate"] or 0.0, 4),
             oos_trades=oos_card["n_trades"], oos_win_rate=round(oos_card["win_rate"] or 0.0, 4),
@@ -351,33 +384,36 @@ def train_and_combat(
     # Choose on WFA evidence alone, then spend holdout once on exactly that candidate.
     selected = None
     selected_pnl = 0.0
-    holdout_attempted = bool(wfa_qualifiers)
+    holdout_attempted = bool(wfa_qualifiers) and check_holdout
+    holdout_result = None
     if wfa_qualifiers:
         wfa_qualifiers.sort(key=lambda item: item[1], reverse=True)
         champion, _, _ = wfa_qualifiers[0]
         champion_record = next(r for r in combatant_records if r.chromosome.id == champion.id)
-        champion_record.status_reason = "Selected by WFA; awaiting the single final holdout check"
-        holdout_result = simulate(champion, ctx, holdout[0], holdout[1], record=True)
-        holdout_card = holdout_result["scorecard"]
-        holdout_min_trades = max(2, round(cfg.gates.min_trades *
-                                          ((holdout[1] - holdout[0]) /
-                                           max(1, is_fold.is_end - is_fold.is_start))))
-        holdout_cfg = cfg.gates.model_copy(update={"min_trades": holdout_min_trades})
-        failed = [g["gate"] for g in gates(holdout_card, holdout_cfg) if not g["passed"]]
-        holdout_passed = not failed and not holdout_result["failed_risk"] and holdout_card["net_pnl"] > 0
-        champion_record.holdout_pnl = round(holdout_card["net_pnl"], 4)
-        champion_record.holdout_drawdown = round(holdout_card["max_drawdown"], 4)
-        champion_record.holdout_trades = holdout_card["n_trades"]
-        champion_record.holdout_win_rate = round(holdout_card["win_rate"] or 0.0, 4)
-        champion_record.holdout_passed = holdout_passed
-        champion_record.qualified = holdout_passed
-        champion_record.status_reason = ("QUALIFIED" if holdout_passed else
-                                         f"final one-time holdout failed: {', '.join(failed) or 'non-positive return or risk failure'}")
-        if holdout_passed:
-            selected = champion
-            selected_pnl = holdout_card["net_pnl"]
+        if not check_holdout:
+            champion_record.status_reason = "WFA-qualified; final holdout check deferred until search ends"
         else:
-            if progress:
+            champion_record.status_reason = "Selected by WFA; awaiting the single final holdout check"
+            holdout_result = simulate(champion, ctx, holdout[0], holdout[1], record=True)
+            holdout_card = holdout_result["scorecard"]
+            holdout_min_trades = max(2, round(cfg.gates.min_trades *
+                                              ((holdout[1] - holdout[0]) /
+                                               max(1, is_fold.is_end - is_fold.is_start))))
+            holdout_cfg = cfg.gates.model_copy(update={"min_trades": holdout_min_trades})
+            failed = [g["gate"] for g in gates(holdout_card, holdout_cfg) if not g["passed"]]
+            holdout_passed = not failed and not holdout_result["failed_risk"] and holdout_card["net_pnl"] > 0
+            champion_record.holdout_pnl = round(holdout_card["net_pnl"], 4)
+            champion_record.holdout_drawdown = round(holdout_card["max_drawdown"], 4)
+            champion_record.holdout_trades = holdout_card["n_trades"]
+            champion_record.holdout_win_rate = round(holdout_card["win_rate"] or 0.0, 4)
+            champion_record.holdout_passed = holdout_passed
+            champion_record.qualified = holdout_passed
+            champion_record.status_reason = ("QUALIFIED" if holdout_passed else
+                                             f"final one-time holdout failed: {', '.join(failed) or 'non-positive return or risk failure'}")
+            if holdout_passed:
+                selected = champion
+                selected_pnl = holdout_card["net_pnl"]
+            elif progress:
                 progress("state", {"to": "ARENA_COMPLETED", "reason": champion_record.status_reason,
                                    "fold": 0, "holdout_attempted": True})
 
@@ -396,16 +432,28 @@ def train_and_combat(
             summary=summary, decisions=decisions, holdout_attempted=True,
         )
 
-    summary = ("Final one-time holdout check failed; stopping without trying another candidate."
-               if holdout_attempted else
-               f"Combat completed with {is_survivors} IS survivors, but none satisfied WFA robustness gates.")
+    summary = (
+        "WFA-qualified candidate selected; final holdout check deferred until search ends."
+        if wfa_qualifiers and not check_holdout else
+        "Final one-time holdout check failed; stopping without trying another candidate."
+        if holdout_attempted else
+        f"Combat completed with {is_survivors} IS survivors, but none satisfied WFA robustness gates."
+    )
     if progress:
         progress("state", {"to": "ARENA_COMPLETED", "reason": summary, "fold": 0,
                            "holdout_attempted": holdout_attempted})
+    fallback_decisions = []
+    if holdout_attempted and holdout_result and holdout_result.get("decisions"):
+        fallback_decisions = holdout_result["decisions"]
+    elif combatant_records:
+        best_c = max(combatant_records, key=lambda c: (c.wfa_qualified, c.selection_score, c.oos_pnl), default=None)
+        if best_c and best_c.decisions:
+            fallback_decisions = best_c.decisions
+
     return ArenaResult(
         champion=None, total_spawned=total_spawned, is_survivors=is_survivors,
         oos_qualifiers=oos_qualifiers, combatants=combatant_records,
-        summary=summary, holdout_attempted=holdout_attempted,
+        summary=summary, decisions=fallback_decisions, holdout_attempted=holdout_attempted,
     )
 
 
@@ -421,49 +469,100 @@ def auto_train_until_survivor(
     max_rounds: int = 10,
     progress: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> tuple[ArenaResult, int]:
-    """Repeatedly conducts arena combat with progressive seed shifts and elite carry-over
-    until at least one champion satisfies strict anti-overfitting gates, or max_rounds is reached."""
+    """Search for WFA-qualified candidates, then consume the final holdout exactly once.
+
+    Search rounds never inspect holdout. Reused WFA windows are still selection data,
+    so the round limit is a hard bound and results are not independent validation trials.
+    """
     current_seed = seed
     carried_pool: list[Chromosome] = list(base_population) if base_population else []
-    last_res: ArenaResult | None = None
+    best_res: ArenaResult | None = None
+    total_spawned = 0
+    target_rounds = max(1, max_rounds)
 
-    for round_idx in range(1, max_rounds + 1):
-        print(f"\n--- [Auto-Train Round {round_idx}/{max_rounds}] seed={current_seed} pop={pop_size} gens={generations} ---", flush=True)
+    for round_idx in range(1, target_rounds + 1):
+        print(f"\n--- [Auto-Train Round {round_idx}/{target_rounds}] seed={current_seed} pop={pop_size} gens={generations} ---", flush=True)
         res = train_and_combat(
-            bars=bars,
-            cfg=cfg,
-            base_population=carried_pool if carried_pool else None,
-            pop_size=pop_size,
-            generations=generations,
-            elite_pool_size=elite_pool_size,
-            min_consistency=min_consistency,
-            seed=current_seed,
+            bars=bars, cfg=cfg, base_population=carried_pool or None,
+            pop_size=pop_size, generations=generations, elite_pool_size=elite_pool_size,
+            min_consistency=min_consistency, seed=current_seed, check_holdout=False,
             progress=(lambda etype, payload: progress(etype, payload | {"round": round_idx}) if progress else None),
         )
+        total_spawned += res.total_spawned
         res.round_number = round_idx
         res.total_rounds = round_idx
-        last_res = res
+        print(f"Round {round_idx} result: {res.summary} (Spawned: {res.total_spawned}, IS Survivors: {res.is_survivors}, WFA qualifiers: {res.oos_qualifiers})", flush=True)
 
-        print(f"Round {round_idx} result: {res.summary} (Spawned: {res.total_spawned}, IS Survivors: {res.is_survivors}, OOS Qualifiers: {res.oos_qualifiers})", flush=True)
+        if best_res is None or res.oos_qualifiers > best_res.oos_qualifiers or (
+            res.oos_qualifiers == best_res.oos_qualifiers and res.is_survivors > best_res.is_survivors
+        ):
+            best_res = res
 
-        if res.champion is not None or res.holdout_attempted:
-            print(f">>> Final holdout used; stopping auto-training after round {round_idx}.", flush=True)
-            return res, round_idx
+        if res.oos_qualifiers > 0:
+            # Stop searching at the first WFA-qualified batch; do not inspect the holdout yet.
+            best_res = res
+            break
 
-        # If no champion, carry top robust performers (by consistency, retention & OOS PnL) to next round
         if res.combatants:
             robust_combatants = sorted(
                 res.combatants,
-                key=lambda x: (x.consistency, x.neighbour_retention, x.oos_pnl, -abs(x.is_pnl - x.oos_pnl)),
+                key=lambda c: (c.wfa_qualified, c.selection_score, c.consistency,
+                               c.neighbour_retention, c.oos_pnl),
                 reverse=True,
             )
             carried_pool = [c.chromosome for c in robust_combatants[:4]]
         current_seed = (current_seed * 1103515245 + 12345) & 0x7FFFFFFF
 
-    if last_res is not None:
-        last_res.total_rounds = max_rounds
-        return last_res, max_rounds
-    return ArenaResult(champion=None, total_spawned=0, is_survivors=0, oos_qualifiers=0, combatants=[]), max_rounds
+    if best_res is None:
+        best_res = ArenaResult(champion=None, total_spawned=0, is_survivors=0,
+                               oos_qualifiers=0, combatants=[], summary="No search rounds completed.")
+    best_res.total_spawned = total_spawned
+    best_res.total_rounds = round_idx if 'round_idx' in locals() else 0
+    best_res.round_number = best_res.total_rounds
+
+    if best_res.oos_qualifiers <= 0:
+        best_res.summary += " No WFA-qualified survivor found within the round limit; final holdout was not used."
+        return best_res, best_res.total_rounds
+
+    # One final check, on the highest WFA-scoring candidate, after the bounded search.
+    winner = max(
+        (c for c in best_res.combatants if c.wfa_qualified),
+        key=lambda c: (c.selection_score, c.consistency, c.neighbour_retention, c.oos_pnl),
+    )
+    folds, holdout = make_folds(len(bars), pipeline.LOOKBACK, cfg.wfa)
+    if not folds:
+        best_res.summary += " Cannot validate: insufficient walk-forward history; final holdout was not used."
+        return best_res, best_res.total_rounds
+
+    evidence = [pipeline.build(PITView(bars, t)) for t in range(len(bars))]
+    ctx = Context(cfg, bars, evidence)
+    result = simulate(winner.chromosome, ctx, holdout[0], holdout[1], record=True)
+    card = result["scorecard"]
+    is_fold = folds[0]
+    min_trades = max(2, round(cfg.gates.min_trades *
+                             ((holdout[1] - holdout[0]) / max(1, is_fold.is_end - is_fold.is_start))))
+    holdout_cfg = cfg.gates.model_copy(update={"min_trades": min_trades})
+    failed = [g["gate"] for g in gates(card, holdout_cfg) if not g["passed"]]
+    passed = not failed and not result["failed_risk"] and card["net_pnl"] > 0
+    winner.holdout_pnl = round(card["net_pnl"], 4)
+    winner.holdout_drawdown = round(card["max_drawdown"], 4)
+    winner.holdout_trades = card["n_trades"]
+    winner.holdout_win_rate = round(card["win_rate"] or 0.0, 4)
+    winner.holdout_passed = passed
+    winner.qualified = passed
+    winner.status_reason = "QUALIFIED" if passed else (
+        f"final one-time holdout failed: {', '.join(failed) or 'non-positive return or risk failure'}"
+    )
+    best_res.holdout_attempted = True
+    best_res.decisions = result.get("decisions", [])
+    best_res.champion = winner.chromosome if passed else None
+    best_res.champion_oos_pnl = card["net_pnl"] if passed else 0.0
+    best_res.champion_consistency = winner.consistency if passed else 0.0
+    best_res.summary = (
+        f"Champion {winner.chromosome.id} qualified after one final holdout check."
+        if passed else "Final one-time holdout check failed; stopping without trying another candidate."
+    )
+    return best_res, best_res.total_rounds
 
 
 def analyze_arena_result(res: ArenaResult, cfg: ExperimentConfig, round_num: int = 1) -> str:

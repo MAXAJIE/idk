@@ -1,0 +1,77 @@
+diff a/backend/app/api/console.html b/backend/app/api/console.html	(rejected hunks)
+@@ -103,7 +103,7 @@
+ <nav>
+   <button data-tab="training" class="on">🏋️ Training</button>
+   <button data-tab="live">⚡ Live Trading</button>
+-  <button data-tab="debate">📊 Debate &amp; indicators</button>
++  <button data-tab="debate">⚖️ Agent Debate</button>
+ </nav>
+ 
+ <main>
+@@ -194,9 +194,15 @@
+   <!-- DEBATE & INDICATORS -->
+   <div class="tab grid" id="tab-debate">
+     <section class="card s12">
+-      <h2><span class="dot" id="anDot"></span> Rule-based bull vs bear · last closed candle <span class="note" id="anNote"></span></h2>
++      <h2><span class="dot" id="anDot"></span> Evidence debate · last closed candle <span class="note" id="anNote"></span></h2>
+       <div id="verdict"><div class="empty">Loading…</div></div>
+     </section>
++    <section class="card s12">
++      <h2>Two-agent cross-examination <span class="note">Optional LLM; evidence checked; never controls trades or risk</span></h2>
++      <p class="muted">Run two separate analyst turns on the same closed-candle evidence. The bear must respond to the bull's case. Provider output is untrusted and display-only.</p>
++      <button class="btn-sm" id="btnAgentDebate" type="button">Run bull vs bear agents</button>
++      <div id="agentDebate" aria-live="polite"><div class="empty">Click to run an optional, evidence-cited agent debate.</div></div>
++    </section>
+     <section class="card s6"><div class="side bull" id="bull"></div></section>
+     <section class="card s6"><div class="side bear" id="bear"></div></section>
+     <section class="card s8">
+@@ -502,7 +508,7 @@
+   if (ar) {
+     const combatants = (ar.combatants || []).slice().sort((a, b) => Number(b.qualified) - Number(a.qualified) || b.selection_score - a.selection_score);
+     $("arenaResults").innerHTML = `<p>${ar.champion ? `<b class="up">Champion: ${esc(ar.champion.id)}</b>` : `<b class="warn">No qualified survivor</b>`} · ${esc(ar.summary || "")} · spawned ${ar.total_spawned ?? "—"} · IS survivors ${ar.is_survivors ?? "—"} · OOS qualifiers ${ar.oos_qualifiers ?? "—"}</p>` +
+-      table([["Gene"], ["Result"], ["IS PnL", "num"], ["Median WFA PnL", "num"], ["Final holdout PnL", "num"], ["WFA", "num"], ["Retention", "num"], ["Gate notes"]], combatants.map(c => `<tr><td class="mono">${esc(c.chromosome?.id || "—")}</td><td>${c.qualified ? pill("QUALIFIED") : pill("REJECTED")}</td><td class="num">${fmt(c.is_pnl)}</td><td class="num ${cls(c.oos_pnl)}">${fmt(c.oos_pnl)}</td><td class="num ${cls(c.holdout_pnl)}">${c.holdout_pnl == null ? "—" : fmt(c.holdout_pnl)}</td><td class="num">${fmt((c.consistency || 0) * 100, 1)}%</td><td class="num">${fmt(c.neighbour_retention, 2)}</td><td class="wrap muted">${esc(c.status_reason || "")}</td></tr>`));
++      table([["Gene"], ["Result"], ["IS PnL", "num"], ["Median WFA PnL", "num"], ["Final holdout PnL", "num"], ["WFA", "num"], ["Retention", "num"], ["Judge"], ["Gate notes"]], combatants.map(c => `<tr><td class="mono">${esc(c.chromosome?.id || "—")}</td><td>${c.qualified ? pill("QUALIFIED") : pill("REJECTED")}</td><td class="num">${fmt(c.is_pnl)}</td><td class="num ${cls(c.oos_pnl)}">${fmt(c.oos_pnl)}</td><td class="num ${cls(c.holdout_pnl)}">${c.holdout_pnl == null ? "—" : fmt(c.holdout_pnl)}</td><td class="num">${fmt((c.consistency || 0) * 100, 1)}%</td><td class="num">${fmt(c.neighbour_retention, 2)}</td><td>${pill(c.judge?.verdict || "—")}</td><td class="wrap muted">${esc([c.status_reason || "", c.judge?.rationale || ""].filter(Boolean).join(" · "))}</td></tr>`));
+   } else {
+     $("arenaResults").innerHTML = `<div class="empty">${train.plan.mode === "arena" ? (running ? "Arena is training; candidate results will appear after combat." : "Arena result was not saved.") : "This experiment is not an arena training run."}</div>`;
+   }
+@@ -725,6 +731,40 @@
+   drawIndicators();
+ }
+ 
++function renderAgentDebate(payload) {
++  const box = $("agentDebate");
++  if (!payload || payload.status !== "complete") {
++    box.innerHTML = `<div class="empty">${esc(payload?.reason || "Agent debate unavailable")}</div>`;
++    return;
++  }
++  const turn = (role, title) => {
++    const t = payload.turns?.find(x => x.role === role);
++    if (!t) return `<div class="empty">${title}: no response.</div>`;
++    return `<section class="side ${role}" style="margin-top:10px"><h3>${title} · uncertainty ${fmt(t.uncertainty, 2)}</h3>
++      <ul>${(t.claims || []).map(c => `<li>${esc(c.text)} <span class="muted mono">${esc(c.evidence_id)} · weight ${fmt(c.weight, 2)}</span></li>`).join("") || "<li>No supported claims.</li>"}</ul>
++      <b>Counter-examination</b><ul>${(t.counterarguments || []).map(x => `<li>${esc(x)}</li>`).join("") || "<li>No counterargument supplied.</li>"}</ul>
++      <div class="muted">Invalidation: ${esc(t.invalidation)}</div></section>`;
++  };
++  box.innerHTML = `<div class="stats" style="margin-top:12px">${stat("Debate outcome", pill(payload.recommendation), "", true)}${stat("Evidence balance", fmt(payload.score, 3), cls(payload.score))}${stat("Provider", esc(payload.provider || "LLM"), "", true)}</div>
++    <p class="note">${esc(payload.scope || "Research display only. This debate does not affect trades.")}</p>${turn("bull", "Bull analyst")}${turn("bear", "Bear analyst")}`;
++}
++
++$("btnAgentDebate").onclick = async () => {
++  const button = $("btnAgentDebate");
++  button.disabled = true;
++  button.textContent = "Running two analyst turns…";
++  $("agentDebate").innerHTML = `<div class="empty">Using the last closed candle. This may take several seconds.</div>`;
++  try {
++    const result = await j(`/api/analysis/${$("sym").value}?tf=${$("tf").value}&limit=300&agents=llm`);
++    renderAgentDebate(result.agent_debate);
++  } catch (e) {
++    $("agentDebate").innerHTML = `<div class="empty">${esc(e.message)}</div>`;
++  } finally {
++    button.disabled = false;
++    button.textContent = "Run bull vs bear agents";
++  }
++};
++
+ function drawIndicators() {
+   if (!an || tab !== "debate") return;
+   const s = an.series, c = an.candles;

@@ -133,8 +133,9 @@ def test_auto_train_until_survivor_and_analysis_reporting():
         bars, cfg, pop_size=6, generations=2, elite_pool_size=3,
         min_consistency=0.5, seed=42, max_rounds=2
     )
-    assert rounds == 2
+    assert rounds == 1
     assert res.total_spawned == 0
+    assert "same OOS windows from repeated tuning" in res.summary
     report = analyze_arena_result(res, cfg, round_num=rounds)
     assert "ARENA COMBAT & ANTI-OVERFITTING ANALYSIS REPORT" in report
     assert "insufficient valid walk-forward history" in report
@@ -208,25 +209,53 @@ def test_arena_selection_fitness_penalizes_is_wfa_gap_and_complexity():
     assert simpler < consistent
 
 
-def test_auto_train_stops_after_single_holdout_attempt(monkeypatch):
+def test_auto_train_continues_until_wfa_candidate_then_checks_holdout_once(monkeypatch):
     from app.learning import arena
+    from app.genetic.operators import random_chromosome
+    from types import SimpleNamespace
+    import random
 
     calls = []
-    result = arena.ArenaResult(
-        champion=None, total_spawned=8, is_survivors=2, oos_qualifiers=1,
-        combatants=[], summary="final holdout failed", holdout_attempted=True,
+    round1_result = arena.ArenaResult(
+        champion=None, total_spawned=8, is_survivors=2, oos_qualifiers=0,
+        combatants=[], summary="no WFA-qualified survivor",
+    )
+    champ = random_chromosome(random.Random(1))
+    combatant = arena.ArenaCombatant(
+        chromosome=champ, is_pnl=10.0, is_drawdown=0.01, oos_pnl=8.0,
+        oos_drawdown=0.01, consistency=1.0, neighbour_retention=0.8,
+        qualified=False, status_reason="WFA-qualified", wfa_qualified=True,
+        selection_score=0.08,
+    )
+    round2_result = arena.ArenaResult(
+        champion=None, total_spawned=8, is_survivors=3, oos_qualifiers=1,
+        combatants=[combatant], summary="WFA candidate found",
     )
 
     def fake_train(**kwargs):
         calls.append(kwargs)
-        return result
+        return round1_result if len(calls) == 1 else round2_result
 
     monkeypatch.setattr(arena, "train_and_combat", fake_train)
+    monkeypatch.setattr(arena, "make_folds", lambda *args: ([SimpleNamespace(is_start=0, is_end=10)], (10, 20)))
+    monkeypatch.setattr(arena.pipeline, "build", lambda *args: None)
+    monkeypatch.setattr(arena, "Context", lambda *args: object())
+    monkeypatch.setattr(arena, "simulate", lambda *args, **kwargs: {
+        "scorecard": {"net_pnl": 5.0, "max_drawdown": 0.01, "n_trades": 10, "win_rate": 0.6},
+        "failed_risk": False,
+        "decisions": [{"proposal": {"decision_id": "final-check"}}],
+    })
+    monkeypatch.setattr(arena, "gates", lambda *args: [])
+
     cfg = load_config(Path(__file__).parents[1] / "configs/default.json")
     returned, rounds = arena.auto_train_until_survivor(
-        bars=[], cfg=cfg, pop_size=8, generations=4, max_rounds=10,
+        bars=[object()] * 40, cfg=cfg, pop_size=8, generations=4, max_rounds=10,
     )
 
-    assert returned is result
-    assert rounds == 1
-    assert len(calls) == 1
+    assert returned.champion is champ
+    assert returned.holdout_attempted is True
+    assert rounds == 2
+    assert len(calls) == 2
+    assert calls[0]["check_holdout"] is False
+    assert calls[1]["check_holdout"] is False
+    assert returned.decisions[0]["proposal"]["decision_id"] == "final-check"

@@ -53,3 +53,55 @@ def test_open_bar_dropped_and_funding_point_in_time():
     funding = [((now - 3 * h) // 1000 - 10, 0.0001), ((now - 2 * h) // 1000 + 60, 0.0009)]  # 2nd settles after bar 2 opens
     bars = binance.attach_funding(kl, funding)
     assert [b.funding_rate for b in bars] == [0.0001, 0.0001]
+
+
+def test_sync_time_updates_offset():
+    server_time = 1793000000000
+    def tr(method, url, headers):
+        if "/fapi/v1/time" in url:
+            return 200, json.dumps({"serverTime": server_time})
+        return 200, "{}"
+
+    client = TestnetClient(transport=tr)
+    offset = client.sync_time()
+    assert client.time_offset_ms != 0
+    now_ms = int(time.time() * 1000)
+    assert abs(client.time_offset_ms - (server_time - now_ms)) < 500
+
+
+def test_signed_request_recovers_from_code_1021_recv_window_error():
+    calls = []
+    def tr(method, url, headers):
+        calls.append((method, url))
+        if "/fapi/v1/time" in url:
+            return 200, json.dumps({"serverTime": int(time.time() * 1000) + 100})
+        if "/fapi/v2/account" in url:
+            # First attempt fails with -1021
+            if len([c for c in calls if "/fapi/v2/account" in c[1]]) == 1:
+                return 400, '{"code":-1021,"msg":"Timestamp for this request is outside of the recvWindow."}'
+            # Second attempt succeeds
+            return 200, '{"totalMarginBalance": "12345.67"}'
+        return 200, "{}"
+
+    client = TestnetClient(key="TESTKEY", secret="TESTSECRET", transport=tr, retry_backoff_s=0.01)
+    res = client.equity()
+    assert res == 12345.67
+    account_calls = [c for c in calls if "/fapi/v2/account" in c[1]]
+    assert len(account_calls) == 2  # Failed once, recovered and succeeded on retry
+
+def test_signed_request_raises_other_4xx_without_retry():
+    calls = []
+    def tr(method, url, headers):
+        calls.append((method, url))
+        if "/fapi/v1/time" in url:
+            return 200, json.dumps({"serverTime": int(time.time() * 1000)})
+        return 400, '{"code":-1100,"msg":"Illegal characters found in parameter."}'
+
+    from app.live.testnet import ExchangeError
+    client = TestnetClient(key="TESTKEY", secret="TESTSECRET", transport=tr, retry_backoff_s=0.01)
+    with pytest.raises(ExchangeError) as exc:
+        client.equity()
+    assert "-1100" in exc.value.body
+    # Only 1 attempt on /fapi/v2/account (no retries)
+    account_calls = [c for c in calls if "/fapi/v2/account" in c[1]]
+    assert len(account_calls) == 1

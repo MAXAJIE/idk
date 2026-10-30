@@ -1,0 +1,502 @@
+diff --git a/backend/app/agents/discussion.py b/backend/app/agents/discussion.py
+index 78d9a86..66a01da 100644
+--- a/backend/app/agents/discussion.py
++++ b/backend/app/agents/discussion.py
+@@ -2,6 +2,9 @@
+ discussion. Every claim cites an evidence ID from the bundle; no new facts."""
+ from __future__ import annotations
+ 
++import json
++import re
++
+ from app.agents.schemas import AnalystReport, Claim, DiscussionReport, DiscussionTurn
+ from app.features.pipeline import EvidenceBundle
+ 
+@@ -48,21 +51,76 @@ def _claims(eb: EvidenceBundle, bull: bool) -> list[Claim]:
+     return out
+ 
+ 
++def _cross_examine(own: list[Claim], opposing: list[Claim]) -> list[str]:
++    """Make each side answer the strongest contrary, evidence-backed claim."""
++    if not opposing:
++        return ["No evidence-backed opposing claim was found; no counterexample is asserted."]
++    rebuttals = []
++    for claim in sorted(opposing, key=lambda item: item.weight, reverse=True)[:2]:
++        rebuttals.append(
++            f"Counterevidence to {own[0].text if own else 'this side'}: "
++            f"{claim.text} [{claim.evidence_id}]."
++        )
++    return rebuttals
++
++
+ def discuss(eb: EvidenceBundle) -> DiscussionReport:
+-    """Bull speaks first; bear second and must answer bull's strongest claim."""
++    """Two rule-based analysts exchange evidence-backed challenges."""
+     bull, bear = _claims(eb, True), _claims(eb, False)
+     s = eb.get("smc")
+-
+-    def top(cs):
+-        return max(cs, key=lambda c: c.weight).text if cs else "no claim"
+-
+     bw, sw = sum(c.weight for c in bull), sum(c.weight for c in bear)
+     score = (bw - sw) / (bw + sw) if bw + sw else 0.0
+     turns = [
+-        DiscussionTurn(role="bull", claims=bull, counterarguments=[f"bear may cite: {top(bear)}"],
++        DiscussionTurn(role="bull", claims=bull, counterarguments=_cross_examine(bull, bear),
+                        invalidation=f"close below swing low {s['last_swing_low']}", uncertainty=round(1 - min(bw, 1), 3)),
+-        DiscussionTurn(role="bear", claims=bear, counterarguments=[f"rebuts bull: {top(bull)}"],
++        DiscussionTurn(role="bear", claims=bear, counterarguments=_cross_examine(bear, bull),
+                        invalidation=f"close above swing high {s['last_swing_high']}", uncertainty=round(1 - min(sw, 1), 3)),
+     ]
+     rec = "long" if score > 0.2 else "short" if score < -0.2 else "no_trade"
+     return DiscussionReport(turns=turns, score=round(score, 4), recommendation=rec)
++
++
++def _llm_turn(provider, role: str, eb: EvidenceBundle, previous: dict | None) -> DiscussionTurn:
++    evidence = {key: item["value"] for key, item in eb.items.items()}
++    instructions = (
++        "You are one side of a simulated market research debate, not a trader. "
++        "Use only the supplied point-in-time evidence. Make no price predictions or trade instructions. "
++        "Return JSON only with keys claims, counterarguments, invalidation, uncertainty. "
++        "Each claim is {text, evidence_id, weight}; every evidence_id must exactly match a supplied key. "
++        "Each counterargument is a short string and must include its supporting evidence ID verbatim. "
++        "If there is no support, return an empty claims list and say so in counterarguments. "
++        "Do not invent measurements, evidence, citations, or future outcomes."
++    )
++    user = {"role": role, "evidence": evidence, "opposing_turn": previous,
++            "task": ("Present the strongest cautious bullish case." if role == "bull" else
++                     "Present the strongest cautious bearish case and directly challenge the bullish turn."),
++            "schema_example": {"claims": [{"text": "...", "evidence_id": "ev:regime:123", "weight": 0.5}],
++                               "counterarguments": ["... [ev:regime:123]"],
++                               "invalidation": "...", "uncertainty": 0.5}}
++    raw = provider.chat(instructions, json.dumps(user, sort_keys=True), max_tokens=450)
++    try:
++        payload = json.loads(raw)
++    except json.JSONDecodeError:
++        match = re.search(r"\{.*\}", raw, re.S)
++        if not match:
++            raise ValueError(f"{role} agent did not return JSON") from None
++        payload = json.loads(match.group(0))
++    turn = DiscussionTurn(role=role, **payload)
++    valid_ids = set(eb.items)
++    cited = {claim.evidence_id for claim in turn.claims}
++    if not cited.issubset(valid_ids):
++        raise ValueError(f"{role} agent cited evidence outside this candle")
++    referenced = set(re.findall(r"ev:[a-z_]+:\d+", " ".join(turn.counterarguments)))
++    if not referenced.issubset(valid_ids):
++        raise ValueError(f"{role} agent counterargument cited evidence outside this candle")
++    return turn
++
++
++def discuss_with_llm(eb: EvidenceBundle, provider) -> DiscussionReport:
++    """Run two sequential LLM analyst turns; output is display-only and never gates trades."""
++    bull = _llm_turn(provider, "bull", eb, None)
++    bear = _llm_turn(provider, "bear", eb, bull.model_dump())
++    bw, sw = sum(c.weight for c in bull.claims), sum(c.weight for c in bear.claims)
++    score = (bw - sw) / (bw + sw) if bw + sw else 0.0
++    rec = "long" if score > 0.2 else "short" if score < -0.2 else "no_trade"
++    return DiscussionReport(turns=[bull, bear], score=round(score, 4), recommendation=rec)
+diff --git a/backend/app/agents/judge.py b/backend/app/agents/judge.py
+index a76b08b..f0a253c 100644
+--- a/backend/app/agents/judge.py
++++ b/backend/app/agents/judge.py
+@@ -15,8 +15,12 @@ def review(chromosome_id: str, packet: dict, cfg: JudgeConfig, gates: GateConfig
+     flags, concerns, nullified = [], [], []
+     pos_total = sum(max(0.0, t["net_pnl"]) for t in trades)
+     for t in trades:
+-        cited = packet["decisions"].get(t["decision_id"], {}).get("evidence_ids", [])
+-        if t["net_pnl"] > 0 and (not cited or any(e not in packet["valid_evidence"] for e in cited)):
++        decision = packet["decisions"].get(t["decision_id"], {})
++        cited = decision.get("evidence_ids", [])
++        valid_for_decision = packet["valid_evidence"]
++        if isinstance(valid_for_decision, dict):
++            valid_for_decision = valid_for_decision.get(t["decision_id"], set())
++        if t["net_pnl"] > 0 and (not cited or any(e not in valid_for_decision for e in cited)):
+             nullified.append(t["trade_id"])
+             flags.append(f"UNGROUNDED_PROFIT:{t['trade_id']}")
+             continue
+diff --git a/backend/app/api/analysis.py b/backend/app/api/analysis.py
+index 350dee9..ad795d8 100644
+--- a/backend/app/api/analysis.py
++++ b/backend/app/api/analysis.py
+@@ -12,6 +12,8 @@ from app.data.point_in_time import PITView
+ from app.features import pipeline
+ from app.features.trend import atr, ema, rsi
+ 
++_LLM_DEBATE_CACHE: dict[tuple[str, int, int], dict] = {}
++
+ 
+ def _series(bars: list[Bar]) -> dict:
+     closes = [b.close for b in bars]
+@@ -26,7 +28,7 @@ def _series(bars: list[Bar]) -> dict:
+     return out
+ 
+ 
+-def analyse(symbol: str, tf: int = 60, limit: int = 300) -> dict:
++def analyse(symbol: str, tf: int = 60, limit: int = 300, agents: str = "rules") -> dict:
+     snap = live_market.snapshot(symbol, tf, limit)
+     rows = [c for c in snap["candles"] if c[6]]  # closed only: no look-ahead
+     bars = [Bar(i, c[0], c[1], c[2], c[3], c[4], c[5], snap["funding_rate"]) for i, c in enumerate(rows)]
+@@ -38,6 +40,28 @@ def analyse(symbol: str, tf: int = 60, limit: int = 300) -> dict:
+     eb = pipeline.build(PITView(bars, len(bars) - 1))
+     debate = disc_mod.discuss(eb).model_dump() if eb.valid else None
+     reports = [disc_mod.aggregate(eb).model_dump(), disc_mod.technical(eb).model_dump()]
+-    return base | {"valid": eb.valid, "warnings": eb.warnings, "bar_ts": eb.ts,
+-                   "evidence": {v["kind"]: v["value"] for v in eb.items.values()},
+-                   "analysts": reports, "debate": debate, "series": _series(bars)}
++    result = base | {"valid": eb.valid, "warnings": eb.warnings, "bar_ts": eb.ts,
++                     "evidence": {v["kind"]: v["value"] for v in eb.items.values()},
++                     "analysts": reports, "debate": debate, "series": _series(bars)}
++    if agents == "llm" and eb.valid:
++        key = (snap["symbol"], tf, eb.ts)
++        if key in _LLM_DEBATE_CACHE:
++            result["agent_debate"] = _LLM_DEBATE_CACHE[key]
++        else:
++            from app.agents.provider import OpenAICompatibleProvider, llm_status
++            status = llm_status()
++            if not status["configured"]:
++                result["agent_debate"] = {"status": "unavailable", "reason": "Configure the server-side LLM provider first."}
++            else:
++                try:
++                    provider = OpenAICompatibleProvider(timeout=12, retries=0)
++                    payload = {"status": "complete", **disc_mod.discuss_with_llm(eb, provider).model_dump(),
++                               "provider": provider.name,
++                               "scope": "research display only; cannot alter trading decisions or risk gates"}
++                    _LLM_DEBATE_CACHE[key] = payload
++                    if len(_LLM_DEBATE_CACHE) > 128:
++                        _LLM_DEBATE_CACHE.pop(next(iter(_LLM_DEBATE_CACHE)))
++                    result["agent_debate"] = payload
++                except Exception as exc:  # noqa: BLE001 provider output is untrusted
++                    result["agent_debate"] = {"status": "error", "reason": f"{type(exc).__name__}: {str(exc)[:180]}"}
++    return result
+diff --git a/backend/app/api/console.html b/backend/app/api/console.html
+index 1ee7f08..0878de7 100644
+--- a/backend/app/api/console.html
++++ b/backend/app/api/console.html
+@@ -103,7 +103,7 @@
+ <nav>
+   <button data-tab="training" class="on">🏋️ Training</button>
+   <button data-tab="live">⚡ Live Trading</button>
+-  <button data-tab="debate">📊 Debate &amp; indicators</button>
++  <button data-tab="debate">⚖️ Agent Debate</button>
+ </nav>
+ 
+ <main>
+@@ -194,9 +194,15 @@
+   <!-- DEBATE & INDICATORS -->
+   <div class="tab grid" id="tab-debate">
+     <section class="card s12">
+-      <h2><span class="dot" id="anDot"></span> Rule-based bull vs bear · last closed candle <span class="note" id="anNote"></span></h2>
++      <h2><span class="dot" id="anDot"></span> Evidence debate · last closed candle <span class="note" id="anNote"></span></h2>
+       <div id="verdict"><div class="empty">Loading…</div></div>
+     </section>
++    <section class="card s12">
++      <h2>Two-agent cross-examination <span class="note">Optional LLM; evidence checked; never controls trades or risk</span></h2>
++      <p class="muted">Run two separate analyst turns on the same closed-candle evidence. The bear must respond to the bull's case. Provider output is untrusted and display-only.</p>
++      <button class="btn-sm" id="btnAgentDebate" type="button">Run bull vs bear agents</button>
++      <div id="agentDebate" aria-live="polite"><div class="empty">Click to run an optional, evidence-cited agent debate.</div></div>
++    </section>
+     <section class="card s6"><div class="side bull" id="bull"></div></section>
+     <section class="card s6"><div class="side bear" id="bear"></div></section>
+     <section class="card s8">
+@@ -502,7 +508,7 @@ async function refreshTraining() {
+   if (ar) {
+     const combatants = (ar.combatants || []).slice().sort((a, b) => Number(b.qualified) - Number(a.qualified) || b.selection_score - a.selection_score);
+     $("arenaResults").innerHTML = `<p>${ar.champion ? `<b class="up">Champion: ${esc(ar.champion.id)}</b>` : `<b class="warn">No qualified survivor</b>`} · ${esc(ar.summary || "")} · spawned ${ar.total_spawned ?? "—"} · IS survivors ${ar.is_survivors ?? "—"} · OOS qualifiers ${ar.oos_qualifiers ?? "—"}</p>` +
+-      table([["Gene"], ["Result"], ["IS PnL", "num"], ["Median WFA PnL", "num"], ["Final holdout PnL", "num"], ["WFA", "num"], ["Retention", "num"], ["Gate notes"]], combatants.map(c => `<tr><td class="mono">${esc(c.chromosome?.id || "—")}</td><td>${c.qualified ? pill("QUALIFIED") : pill("REJECTED")}</td><td class="num">${fmt(c.is_pnl)}</td><td class="num ${cls(c.oos_pnl)}">${fmt(c.oos_pnl)}</td><td class="num ${cls(c.holdout_pnl)}">${c.holdout_pnl == null ? "—" : fmt(c.holdout_pnl)}</td><td class="num">${fmt((c.consistency || 0) * 100, 1)}%</td><td class="num">${fmt(c.neighbour_retention, 2)}</td><td class="wrap muted">${esc(c.status_reason || "")}</td></tr>`));
++      table([["Gene"], ["Result"], ["IS PnL", "num"], ["Median WFA PnL", "num"], ["Final holdout PnL", "num"], ["WFA", "num"], ["Retention", "num"], ["Judge"], ["Gate notes"]], combatants.map(c => `<tr><td class="mono">${esc(c.chromosome?.id || "—")}</td><td>${c.qualified ? pill("QUALIFIED") : pill("REJECTED")}</td><td class="num">${fmt(c.is_pnl)}</td><td class="num ${cls(c.oos_pnl)}">${fmt(c.oos_pnl)}</td><td class="num ${cls(c.holdout_pnl)}">${c.holdout_pnl == null ? "—" : fmt(c.holdout_pnl)}</td><td class="num">${fmt((c.consistency || 0) * 100, 1)}%</td><td class="num">${fmt(c.neighbour_retention, 2)}</td><td>${pill(c.judge?.verdict || "—")}</td><td class="wrap muted">${esc([c.status_reason || "", c.judge?.rationale || ""].filter(Boolean).join(" · "))}</td></tr>`));
+   } else {
+     $("arenaResults").innerHTML = `<div class="empty">${train.plan.mode === "arena" ? (running ? "Arena is training; candidate results will appear after combat." : "Arena result was not saved.") : "This experiment is not an arena training run."}</div>`;
+   }
+@@ -725,6 +731,40 @@ async function refreshAnalysis() {
+   drawIndicators();
+ }
+ 
++function renderAgentDebate(payload) {
++  const box = $("agentDebate");
++  if (!payload || payload.status !== "complete") {
++    box.innerHTML = `<div class="empty">${esc(payload?.reason || "Agent debate unavailable")}</div>`;
++    return;
++  }
++  const turn = (role, title) => {
++    const t = payload.turns?.find(x => x.role === role);
++    if (!t) return `<div class="empty">${title}: no response.</div>`;
++    return `<section class="side ${role}" style="margin-top:10px"><h3>${title} · uncertainty ${fmt(t.uncertainty, 2)}</h3>
++      <ul>${(t.claims || []).map(c => `<li>${esc(c.text)} <span class="muted mono">${esc(c.evidence_id)} · weight ${fmt(c.weight, 2)}</span></li>`).join("") || "<li>No supported claims.</li>"}</ul>
++      <b>Counter-examination</b><ul>${(t.counterarguments || []).map(x => `<li>${esc(x)}</li>`).join("") || "<li>No counterargument supplied.</li>"}</ul>
++      <div class="muted">Invalidation: ${esc(t.invalidation)}</div></section>`;
++  };
++  box.innerHTML = `<div class="stats" style="margin-top:12px">${stat("Debate outcome", pill(payload.recommendation), "", true)}${stat("Evidence balance", fmt(payload.score, 3), cls(payload.score))}${stat("Provider", esc(payload.provider || "LLM"), "", true)}</div>
++    <p class="note">${esc(payload.scope || "Research display only. This debate does not affect trades.")}</p>${turn("bull", "Bull analyst")}${turn("bear", "Bear analyst")}`;
++}
++
++$("btnAgentDebate").onclick = async () => {
++  const button = $("btnAgentDebate");
++  button.disabled = true;
++  button.textContent = "Running two analyst turns…";
++  $("agentDebate").innerHTML = `<div class="empty">Using the last closed candle. This may take several seconds.</div>`;
++  try {
++    const result = await j(`/api/analysis/${$("sym").value}?tf=${$("tf").value}&limit=300&agents=llm`);
++    renderAgentDebate(result.agent_debate);
++  } catch (e) {
++    $("agentDebate").innerHTML = `<div class="empty">${esc(e.message)}</div>`;
++  } finally {
++    button.disabled = false;
++    button.textContent = "Run bull vs bear agents";
++  }
++};
++
+ function drawIndicators() {
+   if (!an || tab !== "debate") return;
+   const s = an.series, c = an.candles;
+diff --git a/backend/app/api/read_only.py b/backend/app/api/read_only.py
+index 1efb199..05fb48c 100644
+--- a/backend/app/api/read_only.py
++++ b/backend/app/api/read_only.py
+@@ -157,9 +157,11 @@ def create_app(db_path: str = DB) -> FastAPI:
+         return out[-min(limit, 2000):]
+ 
+     @app.get("/api/analysis/{symbol}")
+-    def live_analysis(symbol: str, tf: int = 60, limit: int = 300):
++    def live_analysis(symbol: str, tf: int = 60, limit: int = 300, agents: str = "rules"):
++        if agents not in ("rules", "llm"):
++            raise HTTPException(400, "agents must be rules or llm")
+         try:
+-            return analysis.analyse(symbol, tf, limit)
++            return analysis.analyse(symbol, tf, limit, agents=agents)
+         except ValueError as e:
+             raise HTTPException(400, str(e)) from None
+         except Exception as e:  # noqa: BLE001 upstream/network
+diff --git a/backend/app/learning/arena.py b/backend/app/learning/arena.py
+index bcd69d9..abde81d 100644
+--- a/backend/app/learning/arena.py
++++ b/backend/app/learning/arena.py
+@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
+ from typing import Any, Callable
+ 
+ from app.config import ExperimentConfig
++from app.agents.judge import review as judge_review
+ from app.data.ingest import Bar
+ from app.data.point_in_time import PITView
+ from app.features import pipeline
+@@ -56,6 +57,7 @@ class ArenaCombatant:
+     holdout_win_rate: float | None = None
+     holdout_passed: bool | None = None
+     wfa_qualified: bool = False
++    judge: dict[str, Any] = field(default_factory=dict)
+ 
+     def to_dict(self) -> dict[str, Any]:
+         d = asdict(self)
+@@ -293,7 +295,7 @@ def train_and_combat(
+     for c in elite_combatants:
+         is_res = simulate(c, ctx, is_fold.is_start, is_fold.is_end)
+         is_pnl = is_res["scorecard"]["net_pnl"]
+-        fold_results = [simulate(c, ctx, f.oos_start, f.oos_end) for f in folds]
++        fold_results = [simulate(c, ctx, f.oos_start, f.oos_end, record=True) for f in folds]
+         positive = []
+         for fold, result in zip(folds, fold_results):
+             card = result["scorecard"]
+@@ -316,11 +318,29 @@ def train_and_combat(
+         stress = simulate(c, stress_ctx, folds[-1].oos_start, folds[-1].oos_end)
+         cost_stress_passed = stress["scorecard"]["net_return"] > -0.005 and not stress["failed_risk"]
+ 
++        all_oos_trades = [trade for result in fold_results for trade in result["trades"]]
++        all_oos_decisions = [decision for result in fold_results for decision in result["decisions"]]
++        decision_map = {d["proposal"]["decision_id"]: d["proposal"] for d in all_oos_decisions}
++        valid_evidence = {
++            d["proposal"]["decision_id"]: {evidence[d["t"]].id(kind) for kind in evidence[d["t"]].items}
++            for d in all_oos_decisions
++        }
++        judge_packet = {
++            "trades": all_oos_trades,
++            "exit_range_atr": {key: value for result in fold_results
++                                for key, value in result["exit_range_atr"].items()},
++            "decisions": decision_map, "valid_evidence": valid_evidence,
++            "robustness": {"retention": retention}, "oos_scorecard": oos_card,
++        }
++        verdict = judge_review(c.id, judge_packet, cfg.judge, cfg.gates, cfg.risk.initial_equity)
+         qualified = (len(positive) >= cfg.wfa.min_oos_folds
+                      and consistency >= min_consistency
+                      and retention >= 0.20
+-                     and cost_stress_passed)
++                     and cost_stress_passed
++                     and verdict.verdict == "RETAIN")
+         reasons = []
++        if verdict.verdict != "RETAIN":
++            reasons.append(f"Judge {verdict.verdict}: {verdict.rationale}")
+         if len(positive) < cfg.wfa.min_oos_folds:
+             reasons.append(f"too few profitable OOS folds ({len(positive)} < {cfg.wfa.min_oos_folds})")
+         if consistency < min_consistency:
+@@ -421,49 +441,27 @@ def auto_train_until_survivor(
+     max_rounds: int = 10,
+     progress: Callable[[str, dict[str, Any]], None] | None = None,
+ ) -> tuple[ArenaResult, int]:
+-    """Repeatedly conducts arena combat with progressive seed shifts and elite carry-over
+-    until at least one champion satisfies strict anti-overfitting gates, or max_rounds is reached."""
+-    current_seed = seed
+-    carried_pool: list[Chromosome] = list(base_population) if base_population else []
+-    last_res: ArenaResult | None = None
+-
+-    for round_idx in range(1, max_rounds + 1):
+-        print(f"\n--- [Auto-Train Round {round_idx}/{max_rounds}] seed={current_seed} pop={pop_size} gens={generations} ---", flush=True)
+-        res = train_and_combat(
+-            bars=bars,
+-            cfg=cfg,
+-            base_population=carried_pool if carried_pool else None,
+-            pop_size=pop_size,
+-            generations=generations,
+-            elite_pool_size=elite_pool_size,
+-            min_consistency=min_consistency,
+-            seed=current_seed,
+-            progress=(lambda etype, payload: progress(etype, payload | {"round": round_idx}) if progress else None),
+-        )
+-        res.round_number = round_idx
+-        res.total_rounds = round_idx
+-        last_res = res
+-
+-        print(f"Round {round_idx} result: {res.summary} (Spawned: {res.total_spawned}, IS Survivors: {res.is_survivors}, OOS Qualifiers: {res.oos_qualifiers})", flush=True)
++    """Run one bounded evolutionary search on fixed WFA windows.
+ 
+-        if res.champion is not None or res.holdout_attempted:
+-            print(f">>> Final holdout used; stopping auto-training after round {round_idx}.", flush=True)
+-            return res, round_idx
+-
+-        # If no champion, carry top robust performers (by consistency, retention & OOS PnL) to next round
+-        if res.combatants:
+-            robust_combatants = sorted(
+-                res.combatants,
+-                key=lambda x: (x.consistency, x.neighbour_retention, x.oos_pnl, -abs(x.is_pnl - x.oos_pnl)),
+-                reverse=True,
+-            )
+-            carried_pool = [c.chromosome for c in robust_combatants[:4]]
+-        current_seed = (current_seed * 1103515245 + 12345) & 0x7FFFFFFF
+-
+-    if last_res is not None:
+-        last_res.total_rounds = max_rounds
+-        return last_res, max_rounds
+-    return ArenaResult(champion=None, total_spawned=0, is_survivors=0, oos_qualifiers=0, combatants=[]), max_rounds
++    Outer-loop seed retries on the same OOS windows constitute repeated
++    validation peeking. Evolution therefore happens only inside this call; a
++    failed run requires genuinely fresh, untouched validation history.
++    """
++    if progress:
++        progress("state", {"to": "AUTO_SEARCH_SINGLE_PASS",
++                           "reason": "One WFA search only; do not reuse these OOS windows for seed retries", "round": 1})
++    res = train_and_combat(
++        bars=bars, cfg=cfg, base_population=base_population,
++        pop_size=pop_size, generations=generations,
++        elite_pool_size=elite_pool_size, min_consistency=min_consistency,
++        seed=seed,
++        progress=(lambda etype, payload: progress(etype, payload | {"round": 1}) if progress else None),
++    )
++    res.round_number = 1
++    res.total_rounds = 1
++    if max_rounds > 1:
++        res.summary += " Auto mode stopped after one search to protect the same OOS windows from repeated tuning."
++    return res, 1
+ 
+ 
+ def analyze_arena_result(res: ArenaResult, cfg: ExperimentConfig, round_num: int = 1) -> str:
+diff --git a/backend/tests/test_console_tabs.py b/backend/tests/test_console_tabs.py
+index 584f1f4..e9c7cda 100644
+--- a/backend/tests/test_console_tabs.py
++++ b/backend/tests/test_console_tabs.py
+@@ -40,7 +40,7 @@ def test_root_serves_new_console(tmp_path):
+     c = TestClient(create_app(str(tmp_path / "c.sqlite")))
+     for path in ("/", "/console"):
+         html = c.get(path).text
+-        assert "Debate &amp; indicators" in html and 'data-tab="training"' in html
++        assert "Agent Debate" in html and 'data-tab="training"' in html
+ 
+ 
+ def test_training_api_includes_arena_progress_and_results(tmp_path):
+@@ -120,3 +120,14 @@ def test_websocket_stream_disconnect(tmp_path):
+         _ = ws.receive_json()
+         # Normal client close
+         ws.close()
++
++
++def test_console_exposes_separate_optional_agent_debate_and_judge():
++    from app.api.read_only import CONSOLE
++    html = CONSOLE.read_text()
++    assert 'id="agentDebate"' in html
++    assert 'id="btnAgentDebate"' in html
++    assert "Run bull vs bear agents" in html
++    assert "display-only" in html
++    assert 'agents=llm' in html
++    assert 'c.judge?.verdict' in html
+diff --git a/backend/tests/test_continuous_learning.py b/backend/tests/test_continuous_learning.py
+index 867fcb3..9d22bf0 100644
+--- a/backend/tests/test_continuous_learning.py
++++ b/backend/tests/test_continuous_learning.py
+@@ -133,8 +133,9 @@ def test_auto_train_until_survivor_and_analysis_reporting():
+         bars, cfg, pop_size=6, generations=2, elite_pool_size=3,
+         min_consistency=0.5, seed=42, max_rounds=2
+     )
+-    assert rounds == 2
++    assert rounds == 1
+     assert res.total_spawned == 0
++    assert "same OOS windows from repeated tuning" in res.summary
+     report = analyze_arena_result(res, cfg, round_num=rounds)
+     assert "ARENA COMBAT & ANTI-OVERFITTING ANALYSIS REPORT" in report
+     assert "insufficient valid walk-forward history" in report
+diff --git a/backend/tests/test_ga_judge_reward.py b/backend/tests/test_ga_judge_reward.py
+index b01bd0f..da5bcfb 100644
+--- a/backend/tests/test_ga_judge_reward.py
++++ b/backend/tests/test_ga_judge_reward.py
+@@ -140,3 +140,55 @@ def test_narration_unsupported_ids_flagged_and_errors_surfaced():
+     rec = {"proposal": {"side": "long", "discussion_adoption": "ADOPTED", "evidence_ids": ["ev:atr:1"],
+                         "rationale": "x"}, "risk": {"outcome": "APPROVE", "reasons": ["ok"]}}
+     assert narrate_checked(OfflineProvider(), rec, {"ev:atr:1"})["valid"]
++
++
++def test_llm_debate_is_two_turn_evidence_checked():
++    import json
++    from app.agents.discussion import discuss_with_llm
++    from app.features.pipeline import EvidenceBundle
++
++    eb = EvidenceBundle(t=1, ts=123, valid=True, items={
++        "ev:regime:123": {"kind": "regime", "value": {"trend": "up"}},
++        "ev:smc:123": {"kind": "smc", "value": {"bias": "bear"}},
++    })
++
++    class DebateProvider:
++        def __init__(self):
++            self.calls = []
++
++        def chat(self, system, user, max_tokens=400):
++            prompt = json.loads(user)
++            self.calls.append(prompt)
++            if prompt["role"] == "bull":
++                return json.dumps({"claims": [{"text": "Regime trend is up", "evidence_id": "ev:regime:123", "weight": 0.5}],
++                                   "counterarguments": ["Bearish structure is contrary evidence [ev:smc:123]"],
++                                   "invalidation": "trend evidence changes", "uncertainty": 0.4})
++            return json.dumps({"claims": [{"text": "Structure bias is bear", "evidence_id": "ev:smc:123", "weight": 0.6}],
++                               "counterarguments": ["Bullish regime conflicts [ev:regime:123]"],
++                               "invalidation": "structure evidence changes", "uncertainty": 0.3})
++
++    provider = DebateProvider()
++    report = discuss_with_llm(eb, provider)
++    assert len(provider.calls) == 2
++    assert provider.calls[1]["opposing_turn"]["role"] == "bull"
++    assert [turn.role for turn in report.turns] == ["bull", "bear"]
++    assert report.recommendation in ("long", "short", "no_trade")
++
++
++def test_llm_debate_rejects_unknown_evidence_citation():
++    import json
++    from app.agents.discussion import discuss_with_llm
++    from app.features.pipeline import EvidenceBundle
++
++    eb = EvidenceBundle(t=1, ts=123, valid=True, items={
++        "ev:regime:123": {"kind": "regime", "value": {"trend": "up"}},
++    })
++
++    class BadCitationProvider:
++        def chat(self, system, user, max_tokens=400):
++            return json.dumps({"claims": [{"text": "unsupported", "evidence_id": "ev:future:999", "weight": 1}],
++                               "counterarguments": [], "invalidation": "unknown", "uncertainty": 0.5})
++
++    import pytest
++    with pytest.raises(ValueError, match="outside this candle"):
++        discuss_with_llm(eb, BadCitationProvider())

@@ -80,6 +80,7 @@
   "live": {
     "base_url": "https://testnet.binancefuture.com",
     "signal_source": "testnet",
-    "close_grace_s": 5.0
+    "close_grace_s": 5.0,
+    "recv_window_ms": 10000
   }
 }

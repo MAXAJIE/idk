@@ -27,7 +27,7 @@ from app.data.point_in_time import PITView
 from app.features import pipeline
 from app.features.trend import ema
 from app.genetic.schema import Chromosome
-from app.live.testnet import ExchangeError, TestnetClient
+from app.live.testnet import ExchangeError, RateLimitError, TestnetClient
 from app.persistence.db import Store
 from app.risk import gate
 from app.learning.reflection import ReflectionMemory
@@ -232,6 +232,10 @@ class LiveTrader:
         if self.dry:
             return
         try:
+            if hasattr(self.x, "sync_time"):
+                offset = self.x.sync_time()
+                if abs(offset) > 500:
+                    print(f"[{time.strftime('%H:%M:%S')}] [TIME SYNC] Synced with Binance server time (offset: {offset:+}ms)", flush=True)
             equity = self.x.equity()
             pos = self.x.position(self.sym)
             protect = [o for o in self.x.open_orders(self.sym) if o.get("type") in CONDITIONAL]
@@ -267,7 +271,7 @@ class LiveTrader:
             }
             self.emit("position_reconnected", rec)
             self.emit("position", rec | {"held_bars": 0})
-            print(f"[{time.strftime('%H:%M:%S')}] [RECONNECT] Active {side} position restored: {qty:+.4f} {self.sym} @ {entry:.2f} (uPnL: {upnl:+.2f} USDT, equity: , protect: {len(protect)} orders)", flush=True)
+            print(f"[{time.strftime('%H:%M:%S')}] [RECONNECT] Active {side} position restored: {qty:+.4f} {self.sym} @ {entry:.2f} (uPnL: {upnl:+.2f} USDT, equity: {equity:,.2f} USDT, protect: {len(protect)} orders)", flush=True)
             if len(protect) == 0:
                 print(f"[{time.strftime('%H:%M:%S')}] [WARNING] No exchange-side protective stop/take-profit orders found for open position!", flush=True)
         else:
@@ -277,7 +281,7 @@ class LiveTrader:
                 "position": "FLAT",
                 "qty": 0.0,
             })
-            print(f"[{time.strftime('%H:%M:%S')}] [SYNC] Account equity: , position: FLAT", flush=True)
+            print(f"[{time.strftime('%H:%M:%S')}] [SYNC] Account equity: {equity:,.2f} USDT, position: FLAT", flush=True)
 
     def emit(self, t: str, p: dict):
         self.store.append(self.eid, t, p)
@@ -354,6 +358,22 @@ class LiveTrader:
         except ExchangeError:
             pass
 
+    def _consume_kill_switch(self):
+        """Consume (archive or remove) the kill switch file so it acts as a one-shot trigger."""
+        try:
+            if not self.kill.exists():
+                return
+            ts_str = time.strftime('%Y%m%d_%H%M%S')
+            archived = self.kill.with_name(f"{self.kill.name}.triggered_{ts_str}")
+            try:
+                self.kill.rename(archived)
+                print(f"[{time.strftime('%H:%M:%S')}] [KILL SWITCH] Consumed: archived trigger file to {archived.name}", flush=True)
+            except Exception:
+                self.kill.unlink(missing_ok=True)
+                print(f"[{time.strftime('%H:%M:%S')}] [KILL SWITCH] Consumed: removed trigger file {self.kill.name}", flush=True)
+        except Exception as e:
+            print(f"[{time.strftime('%H:%M:%S')}] [KILL SWITCH] Warning: could not consume trigger file: {e}", flush=True)
+
     def flatten(self, reason: str):
         if self.dry:
             self.emit("flatten", {"reason": reason, "dry_run": True})
@@ -428,8 +448,10 @@ class LiveTrader:
     # ---------- one closed bar
     def step(self) -> str:
         if self.kill.exists():
+            print(f"[{time.strftime('%H:%M:%S')}] [KILL SWITCH] Stop requested by file: {self.kill.resolve()}; flattening any open position and halting.", flush=True)
             self.flatten("kill switch file present")
             self.emit("halted", {"reason": "kill switch"})
+            self._consume_kill_switch()
             return "KILLED"
         if self.st["halted"]:
             return "HALTED"
@@ -592,6 +614,20 @@ class LiveTrader:
             try:
                 out = self.step()
                 consecutive_errors = 0
+            except RateLimitError as e:
+                consecutive_errors += 1
+                self.emit("exchange_error", {"error": str(e), "consecutive": consecutive_errors, "rate_limited": True})
+                out = "RATE_LIMITED"
+                # Honor Binance ban expiry timestamp or Retry-After header
+                wait_s = 60.0  # default minimum rate-limit cooldown
+                if e.ban_until_ms:
+                    now_ms = int(time.time() * 1000)
+                    wait_s = max(5.0, ((e.ban_until_ms - now_ms) / 1000.0) + 2.0)
+                elif e.retry_after_s:
+                    wait_s = max(5.0, e.retry_after_s + 2.0)
+                print(f"[{time.strftime('%H:%M:%S')}] [RATE LIMIT / BAN] Cooldown for {wait_s:.1f}s until ban/limit expires: {e}", flush=True)
+                time.sleep(wait_s)
+                continue
             except (ExchangeError, Exception) as e:
                 consecutive_errors += 1
                 self.emit("exchange_error", {"error": str(e), "consecutive": consecutive_errors})

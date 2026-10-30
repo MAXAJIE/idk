@@ -140,3 +140,174 @@ def test_narration_unsupported_ids_flagged_and_errors_surfaced():
     rec = {"proposal": {"side": "long", "discussion_adoption": "ADOPTED", "evidence_ids": ["ev:atr:1"],
                         "rationale": "x"}, "risk": {"outcome": "APPROVE", "reasons": ["ok"]}}
     assert narrate_checked(OfflineProvider(), rec, {"ev:atr:1"})["valid"]
+
+
+def test_llm_debate_is_two_turn_evidence_checked():
+    import json
+    from app.agents.discussion import discuss_with_llm
+    from app.features.pipeline import EvidenceBundle
+
+    eb = EvidenceBundle(t=1, ts=123, valid=True, items={
+        "ev:regime:123": {"kind": "regime", "value": {"trend": "up"}},
+        "ev:smc:123": {"kind": "smc", "value": {"bias": "bear"}},
+    })
+
+    class DebateProvider:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, system, user, max_tokens=400):
+            prompt = json.loads(user)
+            self.calls.append(prompt)
+            if prompt["role"] == "bull":
+                return json.dumps({"claims": [{"text": "Regime trend is up", "evidence_id": "ev:regime:123", "weight": 0.5}],
+                                   "counterarguments": ["Bearish structure is contrary evidence [ev:smc:123]"],
+                                   "invalidation": "trend evidence changes", "uncertainty": 0.4})
+            return json.dumps({"claims": [{"text": "Structure bias is bear", "evidence_id": "ev:smc:123", "weight": 0.6}],
+                               "counterarguments": ["Bullish regime conflicts [ev:regime:123]"],
+                               "invalidation": "structure evidence changes", "uncertainty": 0.3})
+
+    provider = DebateProvider()
+    report = discuss_with_llm(eb, provider)
+    assert len(provider.calls) == 2
+    assert provider.calls[1]["opposing_turn"]["role"] == "bull"
+    assert [turn.role for turn in report.turns] == ["bull", "bear"]
+    assert report.recommendation in ("long", "short", "no_trade")
+
+
+def test_llm_debate_rejects_unknown_evidence_citation():
+    import json
+    from app.agents.discussion import discuss_with_llm
+    from app.features.pipeline import EvidenceBundle
+
+    eb = EvidenceBundle(t=1, ts=123, valid=True, items={
+        "ev:regime:123": {"kind": "regime", "value": {"trend": "up"}},
+    })
+
+    class BadCitationProvider:
+        def chat(self, system, user, max_tokens=400):
+            return json.dumps({"claims": [{"text": "unsupported", "evidence_id": "ev:future:999", "weight": 1}],
+                               "counterarguments": [], "invalidation": "unknown", "uncertainty": 0.5})
+
+    import pytest
+    with pytest.raises(ValueError, match="outside this candle"):
+        discuss_with_llm(eb, BadCitationProvider())
+
+
+def test_llm_debate_handles_unescaped_quotes_and_malformed_json():
+    import json
+    from app.agents.discussion import discuss_with_llm
+    from app.features.pipeline import EvidenceBundle
+
+    eb = EvidenceBundle(t=1, ts=123, valid=True, items={
+        "ev:regime:123": {"kind": "regime", "value": {"trend": "up"}},
+        "ev:smc:123": {"kind": "smc", "value": {"bias": "bear"}},
+    })
+
+    class MalformedJsonProvider:
+        def chat(self, system, user, max_tokens=1500):
+            prompt = json.loads(user)
+            role = prompt["role"]
+            if role == "bull":
+                # Simulated markdown fences + unescaped quotes inside string
+                return (
+                    '```json\n{\n'
+                    '  "claims": [\n'
+                    '    {\n'
+                    '      "text": "Regime shows \"bullish\" trend momentum [ev:regime:123]",\n'
+                    '      "evidence_id": "ev:regime:123",\n'
+                    '      "weight": 0.7\n'
+                    '    }\n'
+                    '  ],\n'
+                    '  "counterarguments": [\n'
+                    '    "Bearish SMC bias is \"contrary\" evidence [ev:smc:123]"\n'
+                    '  ],\n'
+                    '  "invalidation": "trend slope reverses below 0",\n'
+                    '  "uncertainty": 0.3\n'
+                    '}\n```'
+                )
+            # Trailing comma and missing comma between lines
+            return (
+                '{\n'
+                '  "claims": [\n'
+                '    {\n'
+                '      "text": "SMC orderblock breakdown",\n'
+                '      "evidence_id": "ev:smc:123",\n'
+                '      "weight": 0.8\n'
+                '    }\n'
+                '  ],\n'
+                '  "counterarguments": [\n'
+                '    "Regime is still bullish [ev:regime:123]"\n'
+                '  ],\n'
+                '  "invalidation": "break of swing high",\n'
+                '  "uncertainty": 0.25,\n'
+                '}'
+            )
+
+    report = discuss_with_llm(eb, MalformedJsonProvider())
+    assert len(report.turns) == 2
+    assert report.turns[0].role == "bull"
+    assert report.turns[0].claims[0].evidence_id == "ev:regime:123"
+    assert report.turns[1].role == "bear"
+    assert report.turns[1].claims[0].evidence_id == "ev:smc:123"
+    assert report.recommendation in ("long", "short", "no_trade")
+
+
+def test_llm_debate_full_two_round_cross_examination():
+    import json
+    from app.agents.discussion import discuss_with_llm
+    from app.features.pipeline import EvidenceBundle
+
+    eb = EvidenceBundle(t=1, ts=123, valid=True, items={
+        "ev:regime:123": {"kind": "regime", "value": {"trend": "up"}},
+        "ev:smc:123": {"kind": "smc", "value": {"bias": "bear"}},
+    })
+
+    class MultiTurnDebateProvider:
+        def __init__(self):
+            self.stages = []
+
+        def chat(self, system, user, max_tokens=1500):
+            p = json.loads(user)
+            self.stages.append((p["role"], p["stage"]))
+            if p["role"] == "bull":
+                return json.dumps({
+                    "claims": [{"text": f"Bull claim at {p['stage']}", "evidence_id": "ev:regime:123", "weight": 0.6}],
+                    "counterarguments": ["Challenge to bear [ev:smc:123]"],
+                    "invalidation": "loss of 64000", "uncertainty": 0.3
+                })
+            return json.dumps({
+                "claims": [{"text": f"Bear counter at {p['stage']}", "evidence_id": "ev:smc:123", "weight": 0.5}],
+                "counterarguments": ["Challenge to bull [ev:regime:123]"],
+                "invalidation": "gain above 66000", "uncertainty": 0.35
+            })
+
+    provider = MultiTurnDebateProvider()
+    report = discuss_with_llm(eb, provider, rounds=2)
+    assert len(provider.stages) == 4
+    assert [s[0] for s in provider.stages] == ["bull", "bear", "bull", "bear"]
+    assert [s[1] for s in provider.stages] == ["opening", "cross_examination", "rebuttal", "closing"]
+    assert len(report.turns) == 4
+    assert "cross-examination" in report.judge_summary.lower()
+    assert report.recommendation in ("long", "short", "no_trade")
+
+
+def test_arena_evidence_ids_are_not_double_prefixed(cfg):
+    from app.features.pipeline import EvidenceBundle
+    from app.learning.arena import _valid_evidence_by_decision
+
+    eb = EvidenceBundle(t=7, ts=1234, valid=True, items={
+        "ev:atr:1234": {"kind": "atr", "value": {"atr14": 2.0}},
+        "ev:snr:1234": {"kind": "snr", "value": {"support": None}},
+    })
+    decision = {"t": 7, "proposal": {"decision_id": "d7", "evidence_ids": ["ev:atr:1234", "ev:snr:1234"]}}
+
+    valid = _valid_evidence_by_decision([eb] * 8, [decision])
+    assert valid == {"d7": {"ev:atr:1234", "ev:snr:1234"}}
+
+    trade = _trade("profit", 100, did="d7")
+    packet = _packet([trade], decisions={"d7": decision["proposal"]})
+    packet["valid_evidence"] = valid
+    verdict = judge.review("c", packet, cfg.judge, cfg.gates, 10_000)
+    assert verdict.nullified_trade_ids == []
+    assert verdict.verdict != "REJECT"

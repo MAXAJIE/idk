@@ -34,12 +34,14 @@ class DiscussionTurn(Strict):
     counterarguments: list[str]
     invalidation: str
     uncertainty: float = Field(ge=0, le=1)
+    stage: str = "opening"
 
 
 class DiscussionReport(Strict):
     turns: list[DiscussionTurn]
     score: float = Field(ge=-1, le=1)
     recommendation: Literal["long", "short", "no_trade"]
+    judge_summary: str = ""
 
 
 class TradeProposal(Strict):

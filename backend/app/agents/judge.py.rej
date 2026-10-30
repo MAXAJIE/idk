@@ -1,0 +1,16 @@
+diff a/backend/app/agents/judge.py b/backend/app/agents/judge.py	(rejected hunks)
+@@ -15,8 +15,12 @@
+     flags, concerns, nullified = [], [], []
+     pos_total = sum(max(0.0, t["net_pnl"]) for t in trades)
+     for t in trades:
+-        cited = packet["decisions"].get(t["decision_id"], {}).get("evidence_ids", [])
+-        if t["net_pnl"] > 0 and (not cited or any(e not in packet["valid_evidence"] for e in cited)):
++        decision = packet["decisions"].get(t["decision_id"], {})
++        cited = decision.get("evidence_ids", [])
++        valid_for_decision = packet["valid_evidence"]
++        if isinstance(valid_for_decision, dict):
++            valid_for_decision = valid_for_decision.get(t["decision_id"], set())
++        if t["net_pnl"] > 0 and (not cited or any(e not in valid_for_decision for e in cited)):
+             nullified.append(t["trade_id"])
+             flags.append(f"UNGROUNDED_PROFIT:{t['trade_id']}")
+             continue

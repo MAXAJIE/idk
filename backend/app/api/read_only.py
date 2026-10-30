@@ -157,9 +157,11 @@ def create_app(db_path: str = DB) -> FastAPI:
         return out[-min(limit, 2000):]
 
     @app.get("/api/analysis/{symbol}")
-    def live_analysis(symbol: str, tf: int = 60, limit: int = 300):
+    def live_analysis(symbol: str, tf: int = 60, limit: int = 300, agents: str = "rules", rounds: int = 2, refresh: bool = False):
+        if agents not in ("rules", "llm"):
+            raise HTTPException(400, "agents must be rules or llm")
         try:
-            return analysis.analyse(symbol, tf, limit)
+            return analysis.analyse(symbol, tf, limit, agents=agents, rounds=rounds, refresh=refresh)
         except ValueError as e:
             raise HTTPException(400, str(e)) from None
         except Exception as e:  # noqa: BLE001 upstream/network

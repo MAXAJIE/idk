@@ -1,0 +1,95 @@
+diff a/backend/app/agents/discussion.py b/backend/app/agents/discussion.py	(rejected hunks)
+@@ -2,6 +2,9 @@
+ discussion. Every claim cites an evidence ID from the bundle; no new facts."""
+ from __future__ import annotations
+ 
++import json
++import re
++
+ from app.agents.schemas import AnalystReport, Claim, DiscussionReport, DiscussionTurn
+ from app.features.pipeline import EvidenceBundle
+ 
+@@ -48,21 +51,76 @@
+     return out
+ 
+ 
++def _cross_examine(own: list[Claim], opposing: list[Claim]) -> list[str]:
++    """Make each side answer the strongest contrary, evidence-backed claim."""
++    if not opposing:
++        return ["No evidence-backed opposing claim was found; no counterexample is asserted."]
++    rebuttals = []
++    for claim in sorted(opposing, key=lambda item: item.weight, reverse=True)[:2]:
++        rebuttals.append(
++            f"Counterevidence to {own[0].text if own else 'this side'}: "
++            f"{claim.text} [{claim.evidence_id}]."
++        )
++    return rebuttals
++
++
+ def discuss(eb: EvidenceBundle) -> DiscussionReport:
+-    """Bull speaks first; bear second and must answer bull's strongest claim."""
++    """Two rule-based analysts exchange evidence-backed challenges."""
+     bull, bear = _claims(eb, True), _claims(eb, False)
+     s = eb.get("smc")
+-
+-    def top(cs):
+-        return max(cs, key=lambda c: c.weight).text if cs else "no claim"
+-
+     bw, sw = sum(c.weight for c in bull), sum(c.weight for c in bear)
+     score = (bw - sw) / (bw + sw) if bw + sw else 0.0
+     turns = [
+-        DiscussionTurn(role="bull", claims=bull, counterarguments=[f"bear may cite: {top(bear)}"],
++        DiscussionTurn(role="bull", claims=bull, counterarguments=_cross_examine(bull, bear),
+                        invalidation=f"close below swing low {s['last_swing_low']}", uncertainty=round(1 - min(bw, 1), 3)),
+-        DiscussionTurn(role="bear", claims=bear, counterarguments=[f"rebuts bull: {top(bull)}"],
++        DiscussionTurn(role="bear", claims=bear, counterarguments=_cross_examine(bear, bull),
+                        invalidation=f"close above swing high {s['last_swing_high']}", uncertainty=round(1 - min(sw, 1), 3)),
+     ]
+     rec = "long" if score > 0.2 else "short" if score < -0.2 else "no_trade"
+     return DiscussionReport(turns=turns, score=round(score, 4), recommendation=rec)
++
++
++def _llm_turn(provider, role: str, eb: EvidenceBundle, previous: dict | None) -> DiscussionTurn:
++    evidence = {key: item["value"] for key, item in eb.items.items()}
++    instructions = (
++        "You are one side of a simulated market research debate, not a trader. "
++        "Use only the supplied point-in-time evidence. Make no price predictions or trade instructions. "
++        "Return JSON only with keys claims, counterarguments, invalidation, uncertainty. "
++        "Each claim is {text, evidence_id, weight}; every evidence_id must exactly match a supplied key. "
++        "Each counterargument is a short string and must include its supporting evidence ID verbatim. "
++        "If there is no support, return an empty claims list and say so in counterarguments. "
++        "Do not invent measurements, evidence, citations, or future outcomes."
++    )
++    user = {"role": role, "evidence": evidence, "opposing_turn": previous,
++            "task": ("Present the strongest cautious bullish case." if role == "bull" else
++                     "Present the strongest cautious bearish case and directly challenge the bullish turn."),
++            "schema_example": {"claims": [{"text": "...", "evidence_id": "ev:regime:123", "weight": 0.5}],
++                               "counterarguments": ["... [ev:regime:123]"],
++                               "invalidation": "...", "uncertainty": 0.5}}
++    raw = provider.chat(instructions, json.dumps(user, sort_keys=True), max_tokens=450)
++    try:
++        payload = json.loads(raw)
++    except json.JSONDecodeError:
++        match = re.search(r"\{.*\}", raw, re.S)
++        if not match:
++            raise ValueError(f"{role} agent did not return JSON") from None
++        payload = json.loads(match.group(0))
++    turn = DiscussionTurn(role=role, **payload)
++    valid_ids = set(eb.items)
++    cited = {claim.evidence_id for claim in turn.claims}
++    if not cited.issubset(valid_ids):
++        raise ValueError(f"{role} agent cited evidence outside this candle")
++    referenced = set(re.findall(r"ev:[a-z_]+:\d+", " ".join(turn.counterarguments)))
++    if not referenced.issubset(valid_ids):
++        raise ValueError(f"{role} agent counterargument cited evidence outside this candle")
++    return turn
++
++
++def discuss_with_llm(eb: EvidenceBundle, provider) -> DiscussionReport:
++    """Run two sequential LLM analyst turns; output is display-only and never gates trades."""
++    bull = _llm_turn(provider, "bull", eb, None)
++    bear = _llm_turn(provider, "bear", eb, bull.model_dump())
++    bw, sw = sum(c.weight for c in bull.claims), sum(c.weight for c in bear.claims)
++    score = (bw - sw) / (bw + sw) if bw + sw else 0.0
++    rec = "long" if score > 0.2 else "short" if score < -0.2 else "no_trade"
++    return DiscussionReport(turns=[bull, bear], score=round(score, 4), recommendation=rec)

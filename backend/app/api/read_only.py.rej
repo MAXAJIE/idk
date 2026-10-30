@@ -1,0 +1,15 @@
+diff a/backend/app/api/read_only.py b/backend/app/api/read_only.py	(rejected hunks)
+@@ -157,9 +157,11 @@
+         return out[-min(limit, 2000):]
+ 
+     @app.get("/api/analysis/{symbol}")
+-    def live_analysis(symbol: str, tf: int = 60, limit: int = 300):
++    def live_analysis(symbol: str, tf: int = 60, limit: int = 300, agents: str = "rules"):
++        if agents not in ("rules", "llm"):
++            raise HTTPException(400, "agents must be rules or llm")
+         try:
+-            return analysis.analyse(symbol, tf, limit)
++            return analysis.analyse(symbol, tf, limit, agents=agents)
+         except ValueError as e:
+             raise HTTPException(400, str(e)) from None
+         except Exception as e:  # noqa: BLE001 upstream/network

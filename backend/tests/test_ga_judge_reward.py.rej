@@ -1,0 +1,57 @@
+diff a/backend/tests/test_ga_judge_reward.py b/backend/tests/test_ga_judge_reward.py	(rejected hunks)
+@@ -140,3 +140,55 @@
+     rec = {"proposal": {"side": "long", "discussion_adoption": "ADOPTED", "evidence_ids": ["ev:atr:1"],
+                         "rationale": "x"}, "risk": {"outcome": "APPROVE", "reasons": ["ok"]}}
+     assert narrate_checked(OfflineProvider(), rec, {"ev:atr:1"})["valid"]
++
++
++def test_llm_debate_is_two_turn_evidence_checked():
++    import json
++    from app.agents.discussion import discuss_with_llm
++    from app.features.pipeline import EvidenceBundle
++
++    eb = EvidenceBundle(t=1, ts=123, valid=True, items={
++        "ev:regime:123": {"kind": "regime", "value": {"trend": "up"}},
++        "ev:smc:123": {"kind": "smc", "value": {"bias": "bear"}},
++    })
++
++    class DebateProvider:
++        def __init__(self):
++            self.calls = []
++
++        def chat(self, system, user, max_tokens=400):
++            prompt = json.loads(user)
++            self.calls.append(prompt)
++            if prompt["role"] == "bull":
++                return json.dumps({"claims": [{"text": "Regime trend is up", "evidence_id": "ev:regime:123", "weight": 0.5}],
++                                   "counterarguments": ["Bearish structure is contrary evidence [ev:smc:123]"],
++                                   "invalidation": "trend evidence changes", "uncertainty": 0.4})
++            return json.dumps({"claims": [{"text": "Structure bias is bear", "evidence_id": "ev:smc:123", "weight": 0.6}],
++                               "counterarguments": ["Bullish regime conflicts [ev:regime:123]"],
++                               "invalidation": "structure evidence changes", "uncertainty": 0.3})
++
++    provider = DebateProvider()
++    report = discuss_with_llm(eb, provider)
++    assert len(provider.calls) == 2
++    assert provider.calls[1]["opposing_turn"]["role"] == "bull"
++    assert [turn.role for turn in report.turns] == ["bull", "bear"]
++    assert report.recommendation in ("long", "short", "no_trade")
++
++
++def test_llm_debate_rejects_unknown_evidence_citation():
++    import json
++    from app.agents.discussion import discuss_with_llm
++    from app.features.pipeline import EvidenceBundle
++
++    eb = EvidenceBundle(t=1, ts=123, valid=True, items={
++        "ev:regime:123": {"kind": "regime", "value": {"trend": "up"}},
++    })
++
++    class BadCitationProvider:
++        def chat(self, system, user, max_tokens=400):
++            return json.dumps({"claims": [{"text": "unsupported", "evidence_id": "ev:future:999", "weight": 1}],
++                               "counterarguments": [], "invalidation": "unknown", "uncertainty": 0.5})
++
++    import pytest
++    with pytest.raises(ValueError, match="outside this candle"):
++        discuss_with_llm(eb, BadCitationProvider())
